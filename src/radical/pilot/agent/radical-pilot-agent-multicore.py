@@ -1522,7 +1522,7 @@ class _Process(subprocess.Popen):
 
     #-------------------------------------------------------------------------
     #
-    def __init__(self, task, all_slots, cores_per_node4r3eeeeeeeeee, launch_method,
+    def __init__(self, task, all_slots, cores_per_node, launch_method,
                  launch_command, logger):
 
         self._task = task
