@@ -1442,7 +1442,6 @@ class Agent(threading.Thread):
                                 update={"$set":{COMMAND_FIELD: []}}, # Wipe content of array
                                 fields=[COMMAND_FIELD]
                     )
-                    self._log.info("retdoc: %s" % retdoc)
 
                     if retdoc:
                         commands = retdoc['commands']
@@ -1453,11 +1452,13 @@ class Agent(threading.Thread):
                         if command[COMMAND_TYPE] == COMMAND_CANCEL_PILOT:
                             self._log.info("Received Cancel Pilot command.")
                             pilot_CANCELED(self._p, self._pilot_id, self._log, "CANCEL received. Terminating.")
-                            return
+                            return # terminate loop
+
                         elif command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
                             self._log.info("Received Cancel Compute Unit command for: %s" % command[COMMAND_ARG])
                             # Put it on the command queue of the ExecWorker
                             self._command_queue.put(command)
+
                         elif command[COMMAND_TYPE] == COMMAND_KEEP_ALIVE:
                             self._log.info("Received KeepAlive command.")
                         else:
