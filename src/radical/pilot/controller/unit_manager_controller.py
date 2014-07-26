@@ -283,7 +283,7 @@ class UnitManagerController(threading.Thread):
             if not self._initialized.is_set():
                 self._initialized.set()
 
-            time.sleep(1)
+            time.sleep(0.1)
 
         # shut down the autonomous input / output transfer worker(s)
         for worker in self._input_file_transfer_worker_pool:
@@ -444,14 +444,12 @@ class UnitManagerController(threading.Thread):
                 wu_transfer.append(unit.uid)
 
         # Bulk-add all non-transfer units-
-        print "Pushing w/o transfer %s" % wu_notransfer
         self._db.assign_compute_units_to_pilot(
             unit_uids=wu_notransfer,
             pilot_uid=pilot_uid,
             pilot_sandbox=pilot_sandbox
         )
 
-        print "Pushing w/  transfer %s" % wu_transfer
         self._db.assign_compute_units_to_pilot(
             unit_uids=wu_transfer,
             pilot_uid=pilot_uid,
@@ -459,7 +457,6 @@ class UnitManagerController(threading.Thread):
         )
 
         for uid in wu_notransfer:
-            print "pushing unit %s to %s" % (uid, pilot_uid)
             log = ["Scheduled for execution on ComputePilot %s." % pilot_uid]
             self._db.set_compute_unit_state(uid, PENDING_EXECUTION, log)
             #self._set_state(uid, PENDING_EXECUTION, log)

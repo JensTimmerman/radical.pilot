@@ -457,8 +457,6 @@ class UnitManager(object):
         # submit to all pilots which got something submitted to
         for pid in pilot_cu_map.keys():
 
-            print "pushing %s" % pilot_cu_map[pid]
-
             self._worker.schedule_compute_units (
                 pilot_uid=pid,
                 units=pilot_cu_map[pid]
@@ -546,7 +544,6 @@ class UnitManager(object):
 
         while all_ok is False :
 
-            print " wait for %s (%s)" % (state, self._worker.get_compute_unit_states(unit_uids=unit_ids))
             all_ok = True
             states = list()
 
@@ -561,7 +558,7 @@ class UnitManager(object):
             if  (None != timeout) and (timeout <= (time.time() - start)):
                 break
 
-            time.sleep (1)
+            time.sleep (0.1)
 
 
         # done waiting
