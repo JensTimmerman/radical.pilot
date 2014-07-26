@@ -109,7 +109,7 @@ UNKNOWN                     = 'Unknown'
 #
 # Helper Methods 
 #
-# ==============================================================================
+# ------------------------------------------------------------------------------
 #
 def parse_commandline () :
 
@@ -284,7 +284,7 @@ def pilot_DONE (mongo_p, pilot_uid, logger):
                    {"$set"  : {"state"        : 'Done',
                                "capability"   : 0},
                     "$push" : {"statehistory" : {"state"     : 'Done', 
-                                                "timestamp" : timestamp()}}
+                                                 "timestamp" : timestamp()}}
                    })
 
     sys.exit (0)
@@ -333,6 +333,7 @@ class LaunchMethod (object) :
                        "Unknown LaunchMethod '%s'", launch_method)
 
 
+    # --------------------------------------------------------------------------
     def command (self, lrms, slots, cores) :
 
         return self.impl.command (slots, lrms, cores)
@@ -624,7 +625,6 @@ class LRMS (object) :
                                })
 
 
-
 # ==============================================================================
 #
 class LRMS_Base (object) :
@@ -645,6 +645,7 @@ class LRMS_Base (object) :
     def configure (self) :
 
         log_raise (self.logger, NotImplementedError, "Unknonwn LRMS")
+
 
 # ==============================================================================
 # 
@@ -1135,7 +1136,6 @@ class Task (object):
 # Execution Worker
 #
 # ==============================================================================
-# ------------------------------------------------------------------------------
 #
 class ExecWorker (object):
     """ 
@@ -1234,10 +1234,8 @@ class ExecWorker (object):
 
             while self._terminate is False:
 
-                idle = True
-
                 try:
-                    command, arg = self._command_queue.get_nowait()
+                    command, arg = self._command_queue.get (block=True, timeout=1)
 
                     if  command == COMMAND_LAUNCH_COMPUTE_UNIT :
 
@@ -1250,14 +1248,12 @@ class ExecWorker (object):
                             task.state = EXECUTING
                             self._running_tasks[task.pid] = task
                             self._updater_queue.put ([task, timestamp()])
-                            idle = False
 
                         elif ret == FAIL :
 
                             # no game -- schedule for state updates
                             task.state = FAILED
                             self._updater_queue.put ([task, timestamp()])
-                            idle = False
 
                         elif ret == RETRY :
 
@@ -1277,8 +1273,6 @@ class ExecWorker (object):
                         if  ret == OK :
                             self._updater_queue.put ([task, timestamp])
 
-
-
                     else:
                         self.logger.error ("Command %s not applicable.", \
                                           command[COMMAND_TYPE])
@@ -1286,13 +1280,10 @@ class ExecWorker (object):
 
 
                 except Queue.Empty:
-                    # do nothing if we don't have any queued tasks
+
+                    # timed out -- i.e. an opportunity for checking self._terminate
                     pass
 
-
-                # if nothing happened in this cycle, zzzzz for a bit
-                if  idle:
-                    time.sleep(0.1)
 
         except Exception :
             
@@ -1407,11 +1398,11 @@ class ExecWorker (object):
         all_caps_dict = list()
         for caps_tuple in all_caps_tuples:
             free_cores, cont, single = caps_tuple
-            count    = all_caps_tuples[caps_tuple]
-            caps_dict = {'free_cores'  : free_cores, 
-                        'continuous'  : cont, 
-                        'single_node' : single, 
-                        'count'       : count}
+            count     = all_caps_tuples[caps_tuple]
+            caps_dict = {'free_cores'  : free_cores,
+                         'continuous'  : cont, 
+                         'single_node' : single, 
+                         'count'       : count}
             all_caps_dict.append(caps_dict)
 
         return all_caps_dict
@@ -1633,7 +1624,7 @@ class ExecWorker (object):
                 # otherwise (if string is not quoted)
                 #    escape all double quotes
 
-                if  arg[0] == arg[-1] == "'" :
+                if  arg[0] == arg[-1]  == "'" :
                     ret.append (arg)
                 elif arg[0] == arg[-1] == '"' :
                     ret.append (arg)
@@ -1799,20 +1790,19 @@ class ExecWorker (object):
 
         while not self._terminate :
 
-            task, ts = self._updater_queue.get_nowait ()
-
-            if task :
+            try :
+                task, ts = self._updater_queue.get (block=True, timeout=1)
 
                 # AM: FIXME: this needs to become a bulk op
                 self._w.update(
-                    {"_id"  : ObjectId(task.uid)}, 
-                    {"$set" : {"state"         : task.state,
-                               "slots"         : task.slots,
-                               "exit_code"     : task.exit_code,
-                               "stdout_id"     : task.stdout_id,
-                               "stderr_id"     : task.stderr_id},
-                     "$push": {"statehistory"  : {"state"    : task.state, 
-                                                  "timestamp": ts}}
+                    {"_id"   : ObjectId(task.uid)}, 
+                    {"$set"  : {"state"        : task.state,
+                                "slots"        : task.slots,
+                                "exit_code"    : task.exit_code,
+                                "stdout_id"    : task.stdout_id,
+                                "stderr_id"    : task.stderr_id},
+                     "$push" : {"statehistory" : {"state"     : task.state, 
+                                                  "timestamp" : ts}}
                     })
 
                 # Update capabilities on monitored, launched and failed tasks
@@ -1824,14 +1814,15 @@ class ExecWorker (object):
                     {"$set": {"capability"  : self._capability}
                     })
 
-            else :
+            except Queue.Empty :
 
-                # idle...
-                time.sleep (0.1)
+                # timed out -- i.e. an opportunity for checking self._terminate
+                pass
 
 
 
-# ------------------------------------------------------------------------------
+
+# ==============================================================================
 #
 class Agent (object):
 
@@ -1915,14 +1906,15 @@ class Agent (object):
             try:
 
                 # do the work...
-                self.check_state    ()
-                self.check_commands ()
-                self.check_tasks    ()
+                busy  = self.check_state    ()
+                busy += self.check_commands ()
+                busy += self.check_tasks    ()
 
-                # poor man's faked notifications...
-                time.sleep (1)
+                # if nothing interesting happened, zzzz a bit
+                if  not busy :
+                    time.sleep (1)
 
-            except Exception, ex:
+            except Exception as ex :
                 # If we arrive here, there was an exception in the main loop.
                 pilot_FAILED (self._p, self._pilot_id, self.logger, 
                               "ERROR in agent main loop: %s. %s" \
@@ -1938,6 +1930,8 @@ class Agent (object):
             self.logger.info ("agent has reached runtime limit of %s seconds." \
                            % str(int(self._runtime)*60))
             pilot_DONE (self._p, self._pilot_id, self.logger)
+
+        return 0
 
 
     # --------------------------------------------------------------------------
@@ -1977,6 +1971,8 @@ class Agent (object):
                 log_raise (self.logger, Exception, 
                            "Received unknown command: %s with arg: %s.", \
                            (command[COMMAND_TYPE], command[COMMAND_ARG]))
+
+        return len(commands)
 
 
     # --------------------------------------------------------------------------
@@ -2021,6 +2017,10 @@ class Agent (object):
                 task.state = 'Scheduling'
 
                 self._command_queue.put ([COMMAND_LAUNCH_COMPUTE_UNIT, task])
+
+            return len(wu_cursor)
+
+        return 0
 
 
 # ==============================================================================
@@ -2086,11 +2086,13 @@ def main () :
         pilot_FAILED (mongo_p, options.pilot_id, logger, 
                       "Caught keyboard interrupt. EXITING")
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 #
 if __name__ == "__main__":
 
     main ()
 
 
+# ==============================================================================
+#
 
