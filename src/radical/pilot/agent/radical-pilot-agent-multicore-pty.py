@@ -295,8 +295,8 @@ def pilot_DONE (mongo_p, pilot_uid, logger):
 def log_raise (logger, exception, message, *args) :
 
     logger.error    (traceback.format_exc())
-    logger.error    (message, *args)
-    raise exception (message % *args)
+    logger.error    (message, args)
+    raise exception (message % args)
 
 
 # ------------------------------------------------------------------------------
@@ -1166,9 +1166,9 @@ class ExecWorker (object):
         self._task_launch_method = self._exec_env.task_launch_method
 
         mongo_client             = pymongo.MongoClient (mongodb_url)
-        mongo_db                 = mongo_client[database_name]
-        self._p                  = mongo_db["%s.p" % session_id]
-        self._w                  = mongo_db["%s.w" % session_id]
+        self._mongo_db           = mongo_client[database_name]
+        self._p                  = self._mongo_db["%s.p" % session_id]
+        self._w                  = self._mongo_db["%s.w" % session_id]
 
         # get some threads going -- those will do all the work.
         self._launcher_shell     = sups.PTYShell ("fork://localhost/", 
@@ -1338,22 +1338,71 @@ class ExecWorker (object):
 
                 else :
 
-                    pid, state = line.split (':', 1)
-                    state      = string_to_state (state)
-                    task       = self._running_tasks.get (pid, None)
+                    pid, state, rc = line.split (':', 2)
+                    state          = string_to_state (state)
+                    task           = self._running_tasks.get (pid, None)
 
                     if  not task :
                         self.logger.warn ("event for unknown pid %s" % pid)
                         continue
 
-                    # FIXME: get return code, trigger data staging, etc.
-
-                    task.state = state
-                    self._updater_queue.put  ([state, timestamp()])
+                    # before doing anything else, let the launcher know that
+                    # there are new free slots...
                     self._change_slot_states (task.slots, FREE)
 
-                    if  state in [DONE, FAILED, CANCELED] :
-                        del self._running_tasks[task.uid]
+                    # we don't get any notifications which leaves the task
+                    # running -- so assume its dead now...
+                    del self._running_tasks[task.uid]
+
+                    # update return code if available (not be on cancel etc)
+                    if  rc :
+                        task.exit_code = int (rc)
+
+                   
+                    # failed, canceled or unknown jobs need no post processing
+                    # but just a status update 
+                    if  state is not DONE :
+
+                        task.state = state
+
+                    # task is done -- upload stdout/stderr if needed
+                    else :
+
+                        task.state = DONE
+                        if  task.output_data :
+                            state = PENDING_OUTPUT_TRANSFER
+                        else:
+                            state = DONE
+
+                        # upload stdout and stderr via GridFS
+                        workdir   = task.workdir
+                        stdout_id = None
+                        stderr_id = None
+
+                        # FIXME: use actual stdout/stdin from task if set
+                        stdout = "%s/STDOUT" % workdir
+                        stderr = "%s/STDERR" % workdir
+
+                        if  op.isfile (stdout) :
+                            fs = gridfs.GridFS (self._mongo_db)
+                            with open (stdout, 'r') as f :
+                                stdout_id = fs.put (f.read(), filename=stdout)
+                                self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                               % (stdout, str(stdout_id)))
+
+                        if op.isfile (stderr) :
+                            fs = gridfs.GridFS (self._mongo_db)
+                            with open (stderr, 'r') as f :
+                                stderr_id = fs.put (f.read(), filename=stderr)
+                                self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                               % (stderr, str(stderr_id)))
+
+                        task.stdout_id = stdout_id
+                        task.stderr_id = stderr_id
+
+
+                    # DONE or NOT DONE: tell it to the mountain
+                    self._updater_queue.put ([task, timestamp()])
 
 
         except Exception :
