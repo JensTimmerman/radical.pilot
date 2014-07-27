@@ -188,6 +188,11 @@ class PilotLauncherWorker(multiprocessing.Process):
                     else:
                         agent_worker = None
 
+                    if 'pilot_agent_ptywrapper' in resource_cfg and resource_cfg['pilot_agent_ptywrapper'] is not None:
+                        agent_ptywrapper = resource_cfg['pilot_agent_ptywrapper']
+                    else:
+                        agent_ptywrapper = None
+
                     ########################################################
                     # database connection parameters
                     database_url = self.db_connection_info.url.split("://")[1]
@@ -274,6 +279,20 @@ class PilotLauncherWorker(multiprocessing.Process):
                         worker_script.copy("%s/agent-worker.py" % str(sandbox))
                         worker_script.close()
 
+                    if agent_ptywrapper is not None:
+                        logger.warning("Using custom agent ptywrapper script: %s" % agent_ptywrapper)
+                        ptywrapper_path = os.path.abspath("%s/../agent/%s" % (cwd, agent_ptywrapper))
+
+                        ptywrapper_script_url = saga.Url("file://localhost/%s" % ptywrapper_path)
+
+                        log_msg = "Copying '%s' to agent sandbox (%s)." % (ptywrapper_script_url, sandbox)
+                        log_messages.append(log_msg)
+                        logger.debug(log_msg)
+
+                        ptywrapper_script = saga.filesystem.File(ptywrapper_script_url)
+                        ptywrapper_script.copy("%s/radical-pilot-agent-ptywrapper.sh" % str(sandbox))
+                        ptywrapper_script.close()
+
                     #########################################################
                     # now that the script is in place and we know where it is,
                     # we can launch the agent
@@ -321,9 +340,6 @@ class PilotLauncherWorker(multiprocessing.Process):
                     if cleanup is True: 
                         bootstrap_args += " -x "               # the cleanup flag
 
-                    if  'RADICAL_PILOT_BENCHMARK' in os.environ :
-                        bootstrap_args += " -b"
-
                     jd.executable = "/bin/bash"
                     jd.arguments = ["-l", "-c", '"chmod +x %s && ./%s %s"' % (bootstrapper, bootstrapper, bootstrap_args)]
 
@@ -358,13 +374,38 @@ class PilotLauncherWorker(multiprocessing.Process):
                     logger.debug(log_msg)
 
                     pilotjob = js.create_job(jd)
+
                     pilotjob.run()
+                    saga_job_id = pilotjob.id
+
+                    # --------------------------------------------
+                    # Update the pilot's state to 'PENDING_ACTIVE'
+                    ts = datetime.datetime.utcnow()
+                    pilot_col.update(
+                        {"_id": ObjectId(compute_pilot_id)},
+                        {"$set": {"state": PENDING_ACTIVE,
+                                  "saga_job_id": saga_job_id},
+                         "$push": {"statehistory": {"state": PENDING_ACTIVE, "timestamp": ts}},
+                         "$pushAll": {"log": log_messages}}                    
+                    )
+                    # --------------------------------------------
+
 
                     # do a quick error check
                     if pilotjob.state == saga.FAILED:
+                        # --------------------------------------------
+                        # Update the pilot's state to 'PENDING_ACTIVE'
+                        ts = datetime.datetime.utcnow()
+                        pilot_col.update(
+                            {"_id": ObjectId(compute_pilot_id)},
+                            {"$set": {"state": FAILED,
+                                      "saga_job_id": saga_job_id},
+                             "$push": {"statehistory": {"state": FAILED, "timestamp": ts}},
+                             "$pushAll": {"log": log_messages}}                    
+                        )
+                        # --------------------------------------------
                         raise Exception("SAGA Job state was FAILED.")
 
-                    saga_job_id = pilotjob.id
                     log_msg = "SAGA job submitted with job id %s" % str(saga_job_id)
 
                     self._local_pilots.append(saga_job_id)
@@ -376,16 +417,6 @@ class PilotLauncherWorker(multiprocessing.Process):
                     ##
                     ##
                     ######################################################################
-
-                    # Update the CU's state to 'DONE' if all transfers were successfull.
-                    ts = datetime.datetime.utcnow()
-                    pilot_col.update(
-                        {"_id": ObjectId(compute_pilot_id)},
-                        {"$set": {"state": PENDING_ACTIVE,
-                                  "saga_job_id": saga_job_id},
-                         "$push": {"statehistory": {"state": PENDING_ACTIVE, "timestamp": ts}},
-                         "$pushAll": {"log": log_messages}}                    
-                    )
 
                 except Exception, ex:
                     # Update the Pilot's state 'FAILED'.

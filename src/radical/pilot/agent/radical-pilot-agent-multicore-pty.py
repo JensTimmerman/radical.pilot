@@ -36,6 +36,18 @@ from   bson.objectid import ObjectId
 
 # ==============================================================================
 #
+# FIXMEs
+#
+# ==============================================================================
+#
+# - purge CU on ptywrapper level after reaching final state (?)
+# - pid overrun on pty layer?
+# - job_service startup (pilot state check, others) will purge all final tasks
+#   -- racing with notifications
+# - RP: canceling many jobs onb shutdown is not done in bulk (and it shows)
+
+# ==============================================================================
+#
 # CONSTANTS
 #
 # ==============================================================================
@@ -241,6 +253,7 @@ def string_to_state (state_str) :
 #
 def pilot_FAILED (mongo_p, pilot_uid, logger, message) :
 
+    traceback.print_stack ()
     logger.error (message)      
 
     mongo_p.update ({"_id"  : ObjectId(pilot_uid)}, 
@@ -295,7 +308,8 @@ def pilot_DONE (mongo_p, pilot_uid, logger):
 def log_raise (logger, exception, message, *args) :
 
     logger.error    (traceback.format_exc())
-    logger.error    (message, args)
+    logger.error    (message, *args)
+    traceback.print_stack ()
     raise exception (message % args)
 
 
@@ -319,18 +333,20 @@ class LaunchMethod (object) :
 
         self.name   = launch_method
         self.logger = logger
-        self.impl   = {LAUNCH_METHOD_LOCAL   : LaunchMethodLocal  (logger),
-                       LAUNCH_METHOD_SSH     : LaunchMethodSSH    (logger),
-                       LAUNCH_METHOD_MPIRUN  : LaunchMethodMPIRUN (logger),
-                       LAUNCH_METHOD_MPIEXEC : LaunchMethodMPIEXEC(logger),
-                       LAUNCH_METHOD_APRUN   : LaunchMethodAPRUN  (logger),
-                       LAUNCH_METHOD_IBRUN   : LaunchMethodIBRUN  (logger),
-                       LAUNCH_METHOD_POE     : LaunchMethodPOE    (logger),
+        impl_class  = {LAUNCH_METHOD_LOCAL   : LaunchMethodLocal  ,
+                       LAUNCH_METHOD_SSH     : LaunchMethodSSH    ,
+                       LAUNCH_METHOD_MPIRUN  : LaunchMethodMPIRUN ,
+                       LAUNCH_METHOD_MPIEXEC : LaunchMethodMPIEXEC,
+                       LAUNCH_METHOD_APRUN   : LaunchMethodAPRUN  ,
+                       LAUNCH_METHOD_IBRUN   : LaunchMethodIBRUN  ,
+                       LAUNCH_METHOD_POE     : LaunchMethodPOE    ,
                       }.get (launch_method, None)
 
-        if  not self.impl :
+        if  not impl_class :
             log_raise (self.logger, RuntimeError, 
                        "Unknown LaunchMethod '%s'", launch_method)
+
+        self.impl = impl_class (logger)
 
 
     # --------------------------------------------------------------------------
@@ -589,21 +605,25 @@ class LRMS (object) :
 
         self.name            = lrms
         self.logger          = logger
-        self.slots           = list()
+        self.slot_list       = list()
         self.node_list       = list()
         self.cores_per_node  = None
 
-        self.impl = {LRMS_NAME_TORQUE : LRMS_TORQUE (requested_cores, logger),
-                     LRMS_NAME_PBSPRO : LRMS_PBSPRO (requested_cores, logger),
-                     LRMS_NAME_SLURM  : LRMS_SLURM  (requested_cores, logger),
-                     LRMS_NAME_SGE    : LRMS_SGE    (requested_cores, logger),
-                     LRMS_NAME_LSF    : LRMS_LSF    (requested_cores, logger),
-                     LRMS_NAME_LOADL  : LRMS_LOADL  (requested_cores, logger),
-                     LRMS_NAME_FORK   : LRMS_FORK   (requested_cores, logger)
-                    }.get (lrms, None)
+        impl_class = {LRMS_NAME_TORQUE : LRMS_TORQUE ,
+                      LRMS_NAME_PBSPRO : LRMS_PBSPRO ,
+                      LRMS_NAME_SLURM  : LRMS_SLURM  ,
+                      LRMS_NAME_SGE    : LRMS_SGE    ,
+                      LRMS_NAME_LSF    : LRMS_LSF    ,
+                      LRMS_NAME_LOADL  : LRMS_LOADL  ,
+                      LRMS_NAME_FORK   : LRMS_FORK   
+                     }.get (lrms, None)
 
-        if  not self.impl :
+        if  not impl_class :
             log_raise (self.logger, RuntimeError, "Unknown LRMS '%s'", lrms)
+
+        self.impl = impl_class (lrms, requested_cores, logger)
+
+        self.impl.configure ()
 
         self.node_list      = self.impl.node_list
         self.cores_per_node = self.impl.cores_per_node
@@ -616,13 +636,12 @@ class LRMS (object) :
         # We put it in a list because we care about (and make use of) the order.
         # Slots are either BUSY or FREE.
 
-        self.slots = list()
         for node in self.node_list :
             
             # FIXME: use real core numbers for non-exclusive host reservations
-            self.slots.append ({ 'node' : node,
-                                 'cores': [FREE for _ in range (0, self.cores_per_node)] 
-                               })
+            self.slot_list.append ({'node' : node,
+                                    'cores': [FREE for _ in range (0, self.cores_per_node)] 
+                                   })
 
 
 # ==============================================================================
@@ -630,21 +649,20 @@ class LRMS (object) :
 class LRMS_Base (object) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
+        self.name            = name
         self.requested_cores = requested_cores
         self.logger          = logger
         self.node_list       = list()
         self.cores_per_node  = None
-        self.target_is_macos = False
-
-        self.configure ()
+      # self.target_is_macos = False
 
 
     # --------------------------------------------------------------------------
     def configure (self) :
 
-        log_raise (self.logger, NotImplementedError, "Unknonwn LRMS")
+        raise NotImplementedError ("invalid LRMS type")
 
 
 # ==============================================================================
@@ -652,16 +670,16 @@ class LRMS_Base (object) :
 class LRMS_FORK (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
     def configure (self) :
 
         detected_cpus = multiprocessing.cpu_count()
-        selected_cpus = min(detected_cpus, self.requested_cores)
+        selected_cpus = max(detected_cpus, self.requested_cores)
 
         self.logger.info ("Detected %d cores on localhost, using %d." \
                        % (detected_cpus, selected_cpus))
@@ -675,9 +693,9 @@ class LRMS_FORK (LRMS_Base) :
 class LRMS_TORQUE (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -713,7 +731,7 @@ class LRMS_TORQUE (LRMS_Base) :
             log_raise (self.logger, Exception, 
                        "Number of entries in $PBS_NODEFILE (%s) does " \
                        "not match $PBS_NUM_NODES*$PBS_NUM_PPN (%s*%s)", \
-                       (torque_nodes_length, torque_nodes, torque_cores_per_node))
+                       torque_nodes_length, torque_nodes, torque_cores_per_node)
 
         # only unique node names
         torque_node_list        = list(set(torque_nodes))
@@ -736,9 +754,9 @@ class LRMS_TORQUE (LRMS_Base) :
 class LRMS_PBSPRO (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -773,7 +791,7 @@ class LRMS_PBSPRO (LRMS_Base) :
         pbspro_num_ppn      = int(pbspro_num_ppn)
         pbspro_node_count   = int(pbspro_node_count)
         pbspro_num_pes      = int(pbspro_num_pes)
-        pbspro_vnodes       = self._parse_pbspro_vnodes()
+        pbspro_vnodes       = self.parse_pbspro_vnodes()
 
         # Verify that $NUM_PES == $NODE_COUNT * $NUM_PPN == len($PBS_NODEFILE)
         if  not (pbspro_node_count * pbspro_num_ppn \
@@ -786,13 +804,12 @@ class LRMS_PBSPRO (LRMS_Base) :
 
 
     # --------------------------------------------------------------------------
-    def _parse_pbspro_vnodes(self):
+    def parse_pbspro_vnodes(self):
 
         # PBS Job ID
         pbspro_jobid = os.environ.get('PBS_JOBID')
         if  pbspro_jobid is None :
-            msg = "$PBS_JOBID not set!"
-            log_raise (self.logger, Exception, msg)
+            log_raise (self.logger, Exception, "$PBS_JOBID not set!")
 
         # Get the output of qstat -f for this job
         output = subprocess.check_output(["qstat", "-f", pbspro_jobid])
@@ -867,9 +884,9 @@ class LRMS_PBSPRO (LRMS_Base) :
 class LRMS_SLURM (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -922,9 +939,9 @@ class LRMS_SLURM (LRMS_Base) :
 class LRMS_SGE (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -961,9 +978,9 @@ class LRMS_SGE (LRMS_Base) :
 class LRMS_LSF (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -1010,9 +1027,9 @@ class LRMS_LSF (LRMS_Base) :
 class LRMS_LOADL (LRMS_Base) :
 
     # --------------------------------------------------------------------------
-    def __init__ (self, requested_cores, logger) :
+    def __init__ (self, name, requested_cores, logger) :
 
-        LRMS_Base.__init__ (self, requested_cores, logger)
+        LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
@@ -1081,7 +1098,7 @@ class ExecutionEnvironment(object):
             log_raise (self.logger, RuntimeError, 
                                    "Not enough cores available (%s) to " \
                                    "satisfy allocation request (%s).", \
-                                   (cores_avail, requested_cores))
+                                   cores_avail, requested_cores)
             
 
 # ==============================================================================
@@ -1093,25 +1110,27 @@ class ExecutionEnvironment(object):
 class Task (object):
 
     # --------------------------------------------------------------------------
-    def __init__(self, uid, description):
+    def __init__(self, uid, wu):
 
-        self.logger       = None
-        self._description = None
+        self.logger         = None
+        self.wu             = wu
+        self.description    = self.wu['description']
 
         # static task properties
         self.uid            = uid
 
-        self.executable     = description["executable"]
-        self.arguments      = description["arguments"]
-        self.environment    = description["environment"]
-        self.cores          = description["cores"]
-        self.mpi            = description["mpi"]
-        self.pre_exec       = description["pre_exec"]
-        self.post_exec      = description["post_exec"]
-        self.workdir        = description["workdir"]
-        self.stdout         = description["stdout"]
-        self.stderr         = description["stderr"]
-        self.output_data    = description["output_data"]
+        self.executable     = self.description.get ("executable",  None)
+        self.arguments      = self.description.get ("arguments",   None)
+        self.environment    = self.description.get ("environment", None)
+        self.cores          = self.description.get ("cores",       None)
+        self.mpi            = self.description.get ("mpi",         None)
+        self.pre_exec       = self.description.get ("pre_exec",    None)
+        self.post_exec      = self.description.get ("post_exec",   None)
+        self.workdir        = self.description.get ("sandbox",     None)
+        self.stdin          = self.description.get ("stdin",       None)
+        self.stdout         = self.description.get ("stdout",      None)
+        self.stderr         = self.description.get ("stderr",      None)
+        self.output_data    = self.description.get ("output_data", None)
 
 
 
@@ -1127,8 +1146,8 @@ class Task (object):
         self.stdout_id      = None
         self.stderr_id      = None
 
-        self._log           = list()
-        self._pid           = None
+        self.log            = list()
+        self.pid            = None
 
 
 # ==============================================================================
@@ -1145,81 +1164,82 @@ class ExecWorker (object):
     # --------------------------------------------------------------------------
     #
     def __init__ (self, logger, command_queue, exec_env,
-                  mongodb_url, database_name, pilot_id, session_id):
+                  mongodb_url, database_name, pilot_id, 
+                  session_id, workdir):
 
-        self.daemon              = True
-        self.logger              = logger
+        self.daemon             = True
+        self.logger             = logger
 
-        self._terminate          = False
-        self._pilot_id           = pilot_id
+        self.terminate          = False
+        self.pilot_id           = pilot_id
         
-        self._command_queue      = command_queue # queued commands by the agent
-        
-        self._running_tasks      = dict() # Launched tasks by this ExecWorker
+        self.command_queue      = command_queue # queued commands by the agent
+        self.running_tasks      = dict() # Launched tasks by this ExecWorker
 
-        self._exec_env           = exec_env
-        self._lrms               = self._exec_env.lrms
-        self._slots              = self._lrms.slot_list
-        self._node_list          = self._lrms.node_list,
-        self._cores_per_node     = self._lrms.cores_per_node,
-        self._mpi_launch_method  = self._exec_env.mpi_launch_method
-        self._task_launch_method = self._exec_env.task_launch_method
+        self.workdir            = workdir 
+        self.exec_env           = exec_env
+        self.lrms               = self.exec_env.lrms
+        self.slots              = self.lrms.slot_list
+        self.node_list          = self.lrms.node_list,
+        self.cores_per_node     = self.lrms.cores_per_node,
+        self.mpi_launch_method  = self.exec_env.mpi_launch_method
+        self.task_launch_method = self.exec_env.task_launch_method
 
-        mongo_client             = pymongo.MongoClient (mongodb_url)
-        self._mongo_db           = mongo_client[database_name]
-        self._p                  = self._mongo_db["%s.p" % session_id]
-        self._w                  = self._mongo_db["%s.w" % session_id]
+        mongo_client            = pymongo.MongoClient (mongodb_url)
+        self.mongo_db           = mongo_client[database_name]
+        self.p                  = self.mongo_db["%s.p" % session_id]
+        self.w                  = self.mongo_db["%s.w" % session_id]
 
         # get some threads going -- those will do all the work.
-        self._launcher_shell     = sups.PTYShell ("fork://localhost/", 
-                                                  logger=self.logger)
-        self._monitor_shell      = sups.PTYShell ("fork://localhost/", 
-                                                  logger=self.logger)
+        self.launcher_shell     = sups.PTYShell ("fork://localhost/", 
+                                                 logger=self.logger)
+        self.monitor_shell      = sups.PTYShell ("fork://localhost/", 
+                                                 logger=self.logger)
 
         # queues toward the updater
-        self._updater_queue      = multiprocessing.Queue ()
+        self.updater_queue      = multiprocessing.Queue ()
 
-        self._launcher           = threading.Thread (target=self.launcher)
-        self._monitor            = threading.Thread (target=self.monitor )
-        self._updater            = threading.Thread (target=self.updater )
+        self.launcher_thread    = threading.Thread (target=self.launcher)
+        self.monitor_thread     = threading.Thread (target=self.monitor )
+        self.updater_thread     = threading.Thread (target=self.updater )
 
-        self._launcher.start ()
-        self._monitor .start ()
-        self._updater .start ()
+        self.launcher_thread.start ()
+        self.monitor_thread .start ()
+        self.updater_thread .start ()
 
         # keep a slot allocation history (short status), start with presumably
         # empty state now
-        self._slot_history    = list()
-        self._slot_history.append (self._slot_status ())
+        self.slot_history       = list()
+        self.slot_history.append (self.slot_status ())
 
         # publish pilot state.  That state is frequently updated to allow
         # higher level load balancing.
-      # self._capability      = self._slots2caps (self._lrms)
-        self._capability      = self._slots2free (self._lrms)
+      # self.capability         = self.slots2caps (self.lrms)
+        self.capability         = self.slots2free (self.lrms)
 
-        self._p.update ({"_id" : ObjectId(self._pilot_id)},
-                        {"$set": {"slothistory" : self._slot_history,
-                                  "capability"  : self._capability,
-                                  "slots"       : self._slots}})
+        self.p.update ({"_id" : ObjectId(self.pilot_id)},
+                        {"$set": {"slothistory" : self.slot_history,
+                                  "capability"  : self.capability,
+                                  "slots"       : self.slots}})
 
     # --------------------------------------------------------------------------
     #
     def stop (self) :
 
-        self._terminate = True
+        self.terminate = True
 
         self.logger.info ("terminating exec worker")
 
-        self.launcher.join ()
-        self.monitor.join  ()
-        self.updater.join  ()
+        self.launcher_thread.join ()
+        self.monitor_thread.join  ()
+        self.updater_thread.join  ()
 
         # we are done -- push slot history 
-        self._p.update(
-            {"_id": ObjectId(self._pilot_id)},
-            {"$set": {"slothistory" : self._slot_history, 
+        self.p.update(
+            {"_id": ObjectId(self.pilot_id)},
+            {"$set": {"slothistory" : self.slot_history, 
                       "capability"  : 0,
-                      "slots"       : self._slots}}
+                      "slots"       : self.slots}}
             )
 
         self.logger.info ("terminated  exec worker")
@@ -1230,67 +1250,70 @@ class ExecWorker (object):
     def launcher (self) :
         """Starts the process when Process.start() is called.
         """
-        try:
 
-            while self._terminate is False:
+        ret, out, _ = self.launcher_shell.run_sync \
+                          ("/bin/sh %s/radical-pilot-agent-ptywrapper.sh $$ %s" \
+                          % (self.workdir, self.workdir))
 
-                try:
-                    command, arg = self._command_queue.get (block=True, timeout=1)
+        if  ret != 0 :
+            log_raise (self.logger, RuntimeError, 
+                       "failed to run launcher bootstrap: (%s)(%s)", ret, out)
 
-                    if  command == COMMAND_LAUNCH_COMPUTE_UNIT :
+        while True :
 
-                        task = arg
-                        ret  = self._task_launch (task)
+            try:
+                command, arg = self.command_queue.get (block=True, timeout=1)
 
-                        if  ret == OK :
+                if  command == COMMAND_LAUNCH_COMPUTE_UNIT :
 
-                            # task spawned ok -- schedule for state updates
-                            task.state = EXECUTING
-                            self._running_tasks[task.pid] = task
-                            self._updater_queue.put ([task, timestamp()])
+                    task = arg
+                    ret  = self.task_launch (task)
 
-                        elif ret == FAIL :
+                    if  ret == OK :
 
-                            # no game -- schedule for state updates
-                            task.state = FAILED
-                            self._updater_queue.put ([task, timestamp()])
+                        # task spawned ok -- schedule for state updates
+                        task.state = EXECUTING
+                        self.running_tasks[task.pid] = task
+                        self.updater_queue.put ([task, timestamp()])
+                        self.logger.info ("launched task: %s - %s", task.uid, task.pid)
 
-                        elif ret == RETRY :
+                    elif ret == FAIL :
 
-                            # No resources free, put back in queue
-                            # FIXME: avoid busy-spin on one non-suitable task!
-                            self._command_queue.put ([COMMAND_LAUNCH_COMPUTE_UNIT, task])
+                        # no game -- schedule for state updates
+                        task.state = FAILED
+                        self.updater_queue.put ([task, timestamp()])
 
+                    elif ret == RETRY :
 
-                    elif command == COMMAND_CANCEL_COMPUTE_UNIT :
-
-                        cuid = arg
-                        task = self._running_tasks.get (cuid, None)
-                        ret  = self._task_cancel (task)
-
-                        # FIXME: eval ret
-
-                        if  ret == OK :
-                            self._updater_queue.put ([task, timestamp])
-
-                    else:
-                        self.logger.error ("Command %s not applicable.", \
-                                          command[COMMAND_TYPE])
-                        continue
+                        # No resources free, put back in queue
+                        # FIXME: avoid busy-spin on one non-suitable task!
+                        self.command_queue.put ([COMMAND_LAUNCH_COMPUTE_UNIT, task])
 
 
-                except Queue.Empty:
+                elif command == COMMAND_CANCEL_COMPUTE_UNIT :
 
-                    # timed out -- i.e. an opportunity for checking self._terminate
-                    pass
+                    cuid = arg
+                    pid  = self.cuid2pid (cuid)
+                    task = self.running_tasks.get (pid, None)
+                    ret  = self.task_cancel (task)
+
+                    # FIXME: eval ret
+
+                    if  ret == OK :
+                        self.updater_queue.put ([task, timestamp])
+
+                else:
+                    self.logger.error ("Command %s not applicable.", \
+                                      command[COMMAND_TYPE])
+                    continue
 
 
-        except Exception :
-            
-            self._terminate = True
-            pilot_FAILED (self._p, self._pilot_id, self.logger, 
-                         "Error in ExecWorker loop: %s" \
-                         % traceback.format_exc())
+            except Queue.Empty:
+
+                # timed out -- i.e. an opportunity for checking self.terminate
+                if  self.terminate :
+                    self.logger.debug ("stop launcher")
+                    return
 
 
     # --------------------------------------------------------------------------
@@ -1299,121 +1322,192 @@ class ExecWorker (object):
 
         MONITOR_READ_TIMEOUT = 1.0   # check for stop signal now and then
 
-        ret, out, _ = self.monitor.run_sync (" /bin/sh %s/wrapper.sh $$" \
-                                             % self._workdir)
+        ret, out, _ = self.monitor_shell.run_sync \
+                          (" /bin/sh %s/radical-pilot-agent-ptywrapper.sh $$ %s" \
+                          % (self.workdir, self.workdir))
 
         if  ret != 0 :
             log_raise (self.logger, RuntimeError, 
-                       "failed to run bootstrap: (%s)(%s)", (ret, out))
+                       "failed to run monitor bootstrap: (%s)(%s)", ret, out)
 
-        # shell_wrapper.sh will report its own PID.
         self.logger.debug ("monitor startup: %s" % out)
 
-        try:
+        self.monitor_shell.run_async ("MONITOR")
 
-            self.monitor.run_async ("MONITOR")
+        while True :
 
-            while self.monitor.alive () :
+            _, out = self.monitor_shell.find (['\n'], 
+                                               timeout=MONITOR_READ_TIMEOUT)
+            line   = out.strip ()
 
-                _, out = self.monitor.find (['\n'], 
-                                            timeout=MONITOR_READ_TIMEOUT)
-                line   = out.strip ()
+            if  not line :
 
-                if  not line :
-
-                    # just a read timeout, i.e. an opportiunity to check for
-                    if  self._terminate :
-                        self.logger.debug ("stop monitor")
-                        return
-
-
-                elif line == 'EXIT' or line == "Killed" :
-                    self.logger.error ("monitor failed - disable notifications")
+                # timed out -- i.e. an opportunity for checking self.terminate
+                if  self.terminate :
+                    self.logger.debug ("stop monitor")
                     return
 
 
-                elif not ':' in line :
-                    self.logger.warn ("monitor noise: %s" % line)
+            elif line == 'EXIT' or line == "Killed" :
+                self.logger.error ("monitor failed - disable notifications")
+                return
 
 
+            elif not ':' in line :
+                self.logger.warn ("monitor noise: %s" % line)
+
+
+            else :
+
+                pid, state, rc = line.split (':', 2)
+                state          = string_to_state (state)
+                task           = self.running_tasks.get (pid, None)
+
+                self.logger.info ("monitored state: %s - %s (%s)", pid, state, line)
+
+                if  not task :
+                    self.logger.warn ("event for unknown pid %s" % pid)
+                    continue
+
+                # before doing anything else, let the launcher know that
+                # there are new free slots...
+                self.change_slot_states (task.slots, FREE)
+
+                # we don't get any notifications which leaves the task
+                # running -- so assume its dead now...
+                del self.running_tasks[task.pid]
+
+                # update return code if available (not be on cancel etc)
+                if  rc :
+                    task.exit_code = int (rc)
+
+               
+                # failed, canceled or unknown jobs need no post processing
+                # but just a status update 
+                if  state is not DONE :
+
+                    task.state = state
+
+                # task is done -- upload stdout/stderr if needed
                 else :
 
-                    pid, state, rc = line.split (':', 2)
-                    state          = string_to_state (state)
-                    task           = self._running_tasks.get (pid, None)
+                    task.state = DONE
+                    if  task.output_data :
+                        state = PENDING_OUTPUT_TRANSFER
+                    else:
+                        state = DONE
 
-                    if  not task :
-                        self.logger.warn ("event for unknown pid %s" % pid)
-                        continue
+                    # upload stdout and stderr via GridFS
+                    workdir   = task.workdir
+                    stdout_id = None
+                    stderr_id = None
 
-                    # before doing anything else, let the launcher know that
-                    # there are new free slots...
-                    self._change_slot_states (task.slots, FREE)
+                    # FIXME: use actual stdout/stdin from task if set
+                    stdout = "%s/STDOUT" % workdir
+                    stderr = "%s/STDERR" % workdir
 
-                    # we don't get any notifications which leaves the task
-                    # running -- so assume its dead now...
-                    del self._running_tasks[task.uid]
+                    if  op.isfile (stdout) :
+                        fs = gridfs.GridFS (self.mongo_db)
+                        with open (stdout, 'r') as f :
+                            stdout_id = fs.put (f.read(), filename=stdout)
+                            self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                           % (stdout, str(stdout_id)))
 
-                    # update return code if available (not be on cancel etc)
-                    if  rc :
-                        task.exit_code = int (rc)
+                    if op.isfile (stderr) :
+                        fs = gridfs.GridFS (self.mongo_db)
+                        with open (stderr, 'r') as f :
+                            stderr_id = fs.put (f.read(), filename=stderr)
+                            self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                           % (stderr, str(stderr_id)))
 
-                   
-                    # failed, canceled or unknown jobs need no post processing
-                    # but just a status update 
-                    if  state is not DONE :
-
-                        task.state = state
-
-                    # task is done -- upload stdout/stderr if needed
-                    else :
-
-                        task.state = DONE
-                        if  task.output_data :
-                            state = PENDING_OUTPUT_TRANSFER
-                        else:
-                            state = DONE
-
-                        # upload stdout and stderr via GridFS
-                        workdir   = task.workdir
-                        stdout_id = None
-                        stderr_id = None
-
-                        # FIXME: use actual stdout/stdin from task if set
-                        stdout = "%s/STDOUT" % workdir
-                        stderr = "%s/STDERR" % workdir
-
-                        if  op.isfile (stdout) :
-                            fs = gridfs.GridFS (self._mongo_db)
-                            with open (stdout, 'r') as f :
-                                stdout_id = fs.put (f.read(), filename=stdout)
-                                self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                               % (stdout, str(stdout_id)))
-
-                        if op.isfile (stderr) :
-                            fs = gridfs.GridFS (self._mongo_db)
-                            with open (stderr, 'r') as f :
-                                stderr_id = fs.put (f.read(), filename=stderr)
-                                self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                               % (stderr, str(stderr_id)))
-
-                        task.stdout_id = stdout_id
-                        task.stderr_id = stderr_id
+                    task.stdout_id = stdout_id
+                    task.stderr_id = stderr_id
 
 
-                    # DONE or NOT DONE: tell it to the mountain
-                    self._updater_queue.put ([task, timestamp()])
-
-
-        except Exception :
-
-            self.logger.error ("error in monitor thread: %s" \
-                               % traceback.format_exc())
+                # DONE or NOT DONE: tell it to the mountain
+                self.updater_queue.put ([task, timestamp()])
 
 
     # --------------------------------------------------------------------------
     #
-    def _slots2free(self, lrms):
+    def updater (self) :
+
+        """ 
+        Updates database entries for tasks coming through the updater queue.  
+        """
+
+        exec_w = False
+      # exec_p = False
+
+        bulk_w = self.w.initialize_ordered_bulk_op ()
+      # bulk_p = self.p.initialize_ordered_bulk_op ()
+
+
+        while True :
+
+            try :
+                task, ts = self.updater_queue.get (block=True, timeout=1)
+
+                # AM: FIXME: this needs to become a bulk op
+                bulk_w.find   ({"_id"  : ObjectId(task.uid)}) \
+                      .update ({"$set" : {"state"       : task.state,
+                                          "slots"       : task.slots,
+                                          "exit_code"   : task.exit_code,
+                                          "stdout_id"   : task.stdout_id,
+                                          "stderr_id"   : task.stderr_id},
+                                "$push": {"statehistory": {"state"    : task.state, 
+                                                           "timestamp": ts}}
+                               })
+                exec_w = True
+
+                # Update capabilities on monitored, launched and failed tasks
+              # self.capability = self.slots2caps(self.lrms)
+              # self.capability = self.slots2free(self.lrms)
+              #
+              # bulk_p.find   ({"_id" : ObjectId(self.pilot_id)}) \
+              #       .update ({"$set": {"capability" : self.capability}})
+              #
+              # exec_p = True
+
+            except Queue.Empty :
+
+                # timed out -- i.e. time to push out the bulk, and an
+                # opportunity for checking self.terminate
+
+                # FIXME: eval result
+                if  exec_w :
+                    exec_w   = False
+                    result_w = bulk_w.execute()
+                    bulk_w   = self.w.initialize_ordered_bulk_op ()
+                    self.logger.info ('pushed bulk_w: %s', result_w)
+                    print result_w
+
+              # # FIXME: eval result
+              # if  exec_p :
+              #     exec_p   = False
+              #     result_p = bulk_p.execute()
+              #     bulk_p   = self.p.initialize_ordered_bulk_op ()
+              #     self.logger.info ('pushed bulk_p: %s', result_p)
+
+                if  self.terminate :
+                    self.logger.debug ("stop updater")
+                    return
+
+
+    # --------------------------------------------------------------------------
+    #
+    def cuid2pid (self, cuid) :
+        # FIXME: this needs to be optimized -- probably by maintaining an
+        # explicit map
+        
+        for pid in self.running_tasks :
+            task = self.running_tasks.get (pid, None)
+            if  task and task.uid == cuid :
+                return pid
+
+    # --------------------------------------------------------------------------
+    #
+    def slots2free(self, lrms):
         """Convert slots structure into a free core count """
 
         free_cores = 0
@@ -1425,7 +1519,7 @@ class ExecWorker (object):
 
     # --------------------------------------------------------------------------
     #
-    def _slots2caps (self, lrms) :
+    def slots2caps (self, lrms) :
         """Convert slots structure into a capability structure """
 
         all_caps_tuples = dict()
@@ -1459,12 +1553,12 @@ class ExecWorker (object):
 
     # --------------------------------------------------------------------------
     #
-    def _slot_status(self):
+    def slot_status(self):
         """Returns a multi-line string corresponding to slot status.
         """
 
         slot_matrix = ""
-        for slot in self._slots:
+        for slot in self.slots:
             slot_matrix += "|"
             for core in slot['cores']:
                 if  core is FREE:
@@ -1482,7 +1576,7 @@ class ExecWorker (object):
     #
     # Returns a data structure in the form of:
     #
-    def _acquire_slots(self, cores_requested, single_node, continuous):
+    def acquire_slots(self, cores_requested, single_node, continuous):
 
         # ----------------------------------------------------------------------
         # Find a needle (continuous sub-list) in a haystack (list)
@@ -1509,7 +1603,7 @@ class ExecWorker (object):
         # Find an available continuous slot within node boundaries.
         def find_slots_single_cont(cores_requested):
 
-            for slot in self._slots:
+            for slot in self.slots:
 
                 slot_node         = slot['node']
                 slot_cores        = slot['cores']
@@ -1529,8 +1623,8 @@ class ExecWorker (object):
         def find_slots_multi_cont(cores_requested):
 
             # Convenience aliases
-            cores_per_node = self._cores_per_node
-            all_slots      = self._slots
+            cores_per_node = self.cores_per_node
+            all_slots      = self.slots
 
             # Glue all slot core lists together
             all_slot_cores = [core for node in [node['cores'] for node in all_slots] \
@@ -1563,9 +1657,9 @@ class ExecWorker (object):
             self.logger.debug("last_slot_core_offset: %s"      % last_slot_core_offset)
 
             # Convenience aliases
-            first_slot = self._slots[first_slot_index]
+            first_slot = self.slots[first_slot_index]
             first_node = first_slot['node']
-            last_slot  = self._slots[last_slot_index]
+            last_slot  = self.slots[last_slot_index]
             last_node  = last_slot['node']
 
             self.logger.debug("last_slot: %s"  % last_slot)
@@ -1614,7 +1708,7 @@ class ExecWorker (object):
                            'Scattered multi node scheduler not implemented.')
 
         if  task_slots is not None:
-            self._change_slot_states(task_slots, BUSY)
+            self.change_slot_states(task_slots, BUSY)
 
         return task_slots
 
@@ -1623,10 +1717,10 @@ class ExecWorker (object):
     #
     # Change the reserved state of slots (FREE or BUSY)
     #
-    def _change_slot_states(self, task_slots, new_state):
+    def change_slot_states(self, task_slots, new_state):
 
         # Convenience alias
-        all_slots = self._slots
+        all_slots = self.slots
 
       # self.logger.debug("change_slot_states: task slots: %s" % task_slots)
 
@@ -1649,16 +1743,16 @@ class ExecWorker (object):
         # mongodb entries MUST NOT grow larger than 16MB, or chaos will ensue.
         # We thus limit the slot history size to 4MB, to keep 'suffient space'
         # for the actual operational data
-        if  len(str(self._slot_history)) < 4 * 1024 * 1024 :
-            self._slot_history.append (self._slot_status ())
+        if  len(str(self.slot_history)) < 4 * 1024 * 1024 :
+            self.slot_history.append (self.slot_status ())
         else :
             # short in space: just replace the last entry ...
-            self._slot_history[-1]  =  self._slot_status ()
+            self.slot_history[-1]  =  self.slot_status ()
 
 
     # --------------------------------------------------------------------------
     #
-    def _task2cmd (self, task) :
+    def task2cmd (self, task) :
 
         # ----------------------------------------------------------------------
         def quote_args (args) :
@@ -1720,9 +1814,9 @@ class ExecWorker (object):
             post = '\n'.join (task.post_exec)
 
         if  task.mpi :
-            cmd = self._exec_env.mpi_launch_method.command  (self._exec_env.lrms, task.slots, task.cores)
+            cmd = self.exec_env.mpi_launch_method.command  (self.exec_env.lrms, task.slots, task.cores)
         else :                                                     
-            cmd = self._exec_env.task_launch_method.command (self._exec_env.lrms, task.slots, task.cores)
+            cmd = self.exec_env.task_launch_method.command (self.exec_env.lrms, task.slots, task.cores)
 
         script  = "%s\n"            %  cwd
         script += "%s\n"            %  env
@@ -1730,18 +1824,18 @@ class ExecWorker (object):
         script += "(%s %s %s) %s\n" % (cmd, exe, arg, io)
         script += "%s\n"            %  post
 
-        self.logger.debug ("execution script:\n%s\n" % script)
+      # self.logger.debug ("execution script:\n%s\n" % script)
 
         return script
 
 
     # --------------------------------------------------------------------------
     #
-    def _task_launch (self, task) :
+    def task_launch (self, task) :
         """ runs a task on the wrapper via pty, and returns the pid """
 
-        if task.mpi: launch_method = self._mpi_launch_method
-        else       : launch_method = self._task_launch_method
+        if task.mpi: launch_method = self.mpi_launch_method
+        else       : launch_method = self.task_launch_method
 
         if  not launch_method :
             self.logger.error ("no launch method for task %s" % task.uid)
@@ -1757,12 +1851,12 @@ class ExecWorker (object):
             req_cont = False
 
         # First try to find all cores on a single node
-        task.slots   = self._acquire_slots (task.cores, single_node=True, 
+        task.slots   = self.acquire_slots (task.cores, single_node=True, 
                                             continuous=req_cont)
 
         # on failure, see if our launch method supports multiple nodes
         if  task.slots is None and launch_method in MULTI_NODE_LAUNCH_METHODS:
-            task.slots = self._acquire_slots (task.cores, single_node=False, 
+            task.slots = self.acquire_slots (task.cores, single_node=False, 
                                               continuous=req_cont)
 
         # Check if we got results
@@ -1770,13 +1864,13 @@ class ExecWorker (object):
             return RETRY
 
         # we got an allocation: go off and launch the process
-        script    = self._task2cmd (task)
+        script    = self.task2cmd (task)
         run_cmd   = "BULK\nLRUN\n%s\nLRUN_EOT\nBULK_RUN\n" % script
 
-        if  self._lrms.target_is_macos :
-            run_cmd = run_cmd.replace ("\\", "\\\\\\\\") # hello MacOS
+      # if  self.lrms.target_is_macos :
+      #     run_cmd = run_cmd.replace ("\\", "\\\\\\\\") # hello MacOS
 
-        ret, out, _ = self._launcher_shell.run_sync (run_cmd)
+        ret, out, _ = self.launcher_shell.run_sync (run_cmd)
 
         if  ret != 0 :
             self.logger.error ("failed to run task '%s': (%s)(%s)" \
@@ -1803,7 +1897,7 @@ class ExecWorker (object):
 
         # before we return, we need to clean the 
         # 'BULK COMPLETED message from lrun
-        ret, out = self._launcher_shell.find_prompt ()
+        ret, out = self.launcher_shell.find_prompt ()
         if  ret != 0 :
             self.logger.error ("failed to run task '%s': (%s)(%s)" \
                             % (run_cmd, ret, out))
@@ -1814,7 +1908,7 @@ class ExecWorker (object):
 
     # --------------------------------------------------------------------------
     #
-    def _task_cancel (self, task) :
+    def task_cancel (self, task) :
 
         if  task == None :
             self.logger.error ("Cannot cancel task $s: not running" % task.uid)
@@ -1823,52 +1917,10 @@ class ExecWorker (object):
         task.state = CANCELED
 
         # FIXME: check retval
-        ret = self._launcher_shell.run_sync ("CANCEL %s" % task.pid)
+        ret = self.launcher_shell.run_sync ("CANCEL %s" % task.pid)
 
         return OK
     
-
-
-    # --------------------------------------------------------------------------
-    #
-    def updater (self) :
-
-        """ 
-        Updates database entries for tasks coming through the updater queue.  
-        """
-
-        while not self._terminate :
-
-            try :
-                task, ts = self._updater_queue.get (block=True, timeout=1)
-
-                # AM: FIXME: this needs to become a bulk op
-                self._w.update(
-                    {"_id"   : ObjectId(task.uid)}, 
-                    {"$set"  : {"state"        : task.state,
-                                "slots"        : task.slots,
-                                "exit_code"    : task.exit_code,
-                                "stdout_id"    : task.stdout_id,
-                                "stderr_id"    : task.stderr_id},
-                     "$push" : {"statehistory" : {"state"     : task.state, 
-                                                  "timestamp" : ts}}
-                    })
-
-                # Update capabilities on monitored, launched and failed tasks
-              # self._capability = self._slots2caps(self._lrms)
-                self._capability = self._slots2free(self._lrms)
-
-                self._p.update(
-                    {"_id" : ObjectId(self._pilot_id)},
-                    {"$set": {"capability"  : self._capability}
-                    })
-
-            except Queue.Empty :
-
-                # timed out -- i.e. an opportunity for checking self._terminate
-                pass
-
-
 
 
 # ==============================================================================
@@ -1879,45 +1931,46 @@ class Agent (object):
     #
     def __init__ (self, options, logger):
 
-        self._options       = options
+        self.options        = options
         self.logger         = logger
-        self._pilot_id      = options.pilot_id
-        self._session_id    = options.session_id
-        self._runtime       = options.runtime
-        self._mongodb_url   = options.mongodb_url
-        self._database_name = options.database_name
-        self._workdir       = options.workdir
-        self._starttime     = time.time()
+        self.pilot_id       = options.pilot_id
+        self.session_id     = options.session_id
+        self.runtime        = options.runtime
+        self.mongodb_url    = options.mongodb_url
+        self.database_name  = options.database_name
+        self.workdir        = options.workdir
+        self.starttime      = time.time()
 
         # interpret some options
-        if  self._workdir is '.' :
-            self._workdir = os.getcwd ()
+        if  self.workdir is '.' :
+            self.workdir = os.getcwd ()
 
         # initialize mongodb connection
-        mongo_client = pymongo.MongoClient (self._mongodb_url)
-        mongo_db     = mongo_client[self._database_name]
-        self._p      = mongo_db["%s.p" % self._session_id]
-        self._w      = mongo_db["%s.w" % self._session_id]
+        mongo_client = pymongo.MongoClient (self.mongodb_url)
+        mongo_db     = mongo_client[self.database_name]
+        self.p       = mongo_db["%s.p" % self.session_id]
+        self.w       = mongo_db["%s.w" % self.session_id]
 
         # Discover environment, nodes, cores, mpi, etc.
-        self._exec_env = ExecutionEnvironment (
-            lrms               = self._options.lrms,
-            requested_cores    = self._options.cores,
-            task_launch_method = self._options.task_launch_method,
-            mpi_launch_method  = self._options.mpi_launch_method,
+        self.exec_env = ExecutionEnvironment (
+            lrms               = self.options.lrms,
+            requested_cores    = self.options.cores,
+            task_launch_method = self.options.task_launch_method,
+            mpi_launch_method  = self.options.mpi_launch_method,
             logger             = logger,
         )
-        self._lrms   = self._exec_env.lrms
+
+        self.lrms = self.exec_env.lrms
 
         # first order of business: set the start time and state of the pilot
         self.logger.info ("agent started. Database updated.")
-        self._p.update(
-            {"_id"  : ObjectId(self._pilot_id)}, 
-            {"$set" : {"state"          : "Active",
-                       "nodes"          : self._lrms.node_list,
-                       "cores_per_node" : self._lrms.cores_per_node,
+        self.p.update(
+            {"_id"  : ObjectId(self.pilot_id)}, 
+            {"$set" : {"state"          : ACTIVE,
+                       "nodes"          : self.lrms.node_list,
+                       "cores_per_node" : self.lrms.cores_per_node,
                        "capability"     : 0},
-             "$push": {"statehistory"   : {"state"    : 'Active', 
+             "$push": {"statehistory"   : {"state"    : ACTIVE,
                                            "timestamp": timestamp()}}
             })
 
@@ -1926,24 +1979,23 @@ class Agent (object):
         # FIXME: cancel commands can only be executed by workers which created
         # the task -- competing for cancel will thus create problems when more
         # than one exec worker is active.
-        self._command_queue = multiprocessing.Queue()
+        self.command_queue = multiprocessing.Queue()
 
         # we assign each node partition to a task execution worker -- it will
         # automatically spawn some threads for task launching, monitoring and
         # updating
         # FIXME: what partitions :P
-        self._exec_worker   = ExecWorker(
-            logger          = self.logger,
-            command_queue   = self._command_queue,
-            exec_env        = self._exec_env,
-            mongodb_url     = self._mongodb_url,
-            database_name   = self._database_name,
-            pilot_id        = self._pilot_id,
-            session_id      = self._session_id,
-        )
+        self.exec_worker = ExecWorker (logger          = self.logger,
+                                        command_queue   = self.command_queue,
+                                        exec_env        = self.exec_env,
+                                        mongodb_url     = self.mongodb_url,
+                                        database_name   = self.database_name,
+                                        pilot_id        = self.pilot_id,
+                                        session_id      = self.session_id,
+                                        workdir         = self.workdir)
 
         self.logger.info ("Started %s serving nodes %s" \
-                       % (self._exec_worker, self._lrms.node_list))
+                       % (self.exec_worker, self.lrms.node_list))
 
 
     # --------------------------------------------------------------------------
@@ -1965,7 +2017,7 @@ class Agent (object):
 
             except Exception as ex :
                 # If we arrive here, there was an exception in the main loop.
-                pilot_FAILED (self._p, self._pilot_id, self.logger, 
+                pilot_FAILED (self.p, self.pilot_id, self.logger, 
                               "ERROR in agent main loop: %s. %s" \
                               % (str(ex), traceback.format_exc()))
 
@@ -1975,10 +2027,10 @@ class Agent (object):
 
         # Make sure that we haven't exceeded the agent runtime. if 
         # we have, terminate. 
-        if  time.time() >= self._starttime + (int(self._runtime) * 60):
+        if  time.time() >= self.starttime + (int(self.runtime) * 60):
             self.logger.info ("agent has reached runtime limit of %s seconds." \
-                           % str(int(self._runtime)*60))
-            pilot_DONE (self._p, self._pilot_id, self.logger)
+                           % str(int(self.runtime)*60))
+            pilot_DONE (self.p, self.pilot_id, self.logger)
 
         return 0
 
@@ -1987,8 +2039,8 @@ class Agent (object):
     def check_commands (self) :
 
         # Check if there's a command waiting
-        retdoc = self._p.find_and_modify (
-                    query  = {"_id"  :  ObjectId (self._pilot_id)},
+        retdoc = self.p.find_and_modify (
+                    query  = {"_id"  :  ObjectId (self.pilot_id)},
                     update = {"$set" : {COMMAND_FIELD: []}},
                     fields = [COMMAND_FIELD]
         )
@@ -1996,20 +2048,18 @@ class Agent (object):
         commands = list()
         if  retdoc:
             commands = retdoc['commands']
-            self.logger.info ("commands: %s" % commands)
-
 
         for command in commands:
 
             if command[COMMAND_TYPE] == COMMAND_CANCEL_PILOT:
                 self.logger.info ("Received Cancel Pilot command.")
-                self._exec_worker.stop ()
-                pilot_CANCELED (self._p, self._pilot_id, self.logger, 
+                self.exec_worker.stop ()
+                pilot_CANCELED (self.p, self.pilot_id, self.logger, 
                                 "CANCEL received. Terminating.")
 
             elif command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
                 # Put it on the command queue of the worker
-                self._command_queue.put(command)
+                self.command_queue.put(command)
                 self.logger.info ("Received Cancel Compute Unit (%s)" \
                                % command[COMMAND_ARG])
 
@@ -2019,7 +2069,7 @@ class Agent (object):
             else:
                 log_raise (self.logger, Exception, 
                            "Received unknown command: %s with arg: %s.", \
-                           (command[COMMAND_TYPE], command[COMMAND_ARG]))
+                           command[COMMAND_TYPE], command[COMMAND_ARG])
 
         return len(commands)
 
@@ -2033,8 +2083,8 @@ class Agent (object):
 
         # Check if there are work units waiting for execution,
         # and log that we pulled it.
-        wu_cursor  =  self._w.find_and_modify (
-            query  = {"pilot" : self._pilot_id,
+        wu_cursor  =  self.w.find_and_modify (
+            query  = {"pilot" : self.pilot_id,
                       "state" : "PendingExecution"},
             update = {"$set" : {"state"       : "Scheduling"},
                       "$push": {"statehistory": {"state":     "Scheduling", 
@@ -2056,16 +2106,16 @@ class Agent (object):
                 w_uid = str(wu["_id"])
                 self.logger.info("Found new task in pilot queue: %s" % w_uid)
 
-                task_dir_name = "%s/unit-%s" % (self._workdir, str(wu["_id"]))
+                task_dir_name = "%s/unit-%s" % (self.workdir, str(wu["_id"]))
 
                 if  not 'workdir' in wu : wu['workdir'] = task_dir_name,
                 if  not 'stdout'  in wu : wu['workdir'] = task_dir_name+'/STDOUT',
                 if  not 'stderr'  in wu : wu['workdir'] = task_dir_name+'/STDERR',
 
-                task       = Task(uid = w_uid, description = wu)
+                task       = Task(uid = w_uid, wu = wu)
                 task.state = 'Scheduling'
 
-                self._command_queue.put ([COMMAND_LAUNCH_COMPUTE_UNIT, task])
+                self.command_queue.put ([COMMAND_LAUNCH_COMPUTE_UNIT, task])
 
             return len(wu_cursor)
 
@@ -2122,18 +2172,19 @@ def main () :
 
     #---------------------------------------------------------------------------
     # Launch the agent
-    try:
+    if True :
+  # try:
         agent = Agent (options = options, 
                        logger  = logger)
         agent.work ()
 
-    except Exception as e :
-        pilot_FAILED (mongo_p, options.pilot_id, logger, 
-                      "Error running agent: %s" % e)
+  # except Exception as e :
+  #     pilot_FAILED (mongo_p, options.pilot_id, logger, 
+  #                   "Error running agent: %s" % e)
 
-    except SystemExit:
-        pilot_FAILED (mongo_p, options.pilot_id, logger, 
-                      "Caught keyboard interrupt. EXITING")
+  # except SystemExit:
+  #     pilot_FAILED (mongo_p, options.pilot_id, logger, 
+  #                   "Caught keyboard interrupt. EXITING")
 
 # ==============================================================================
 #

@@ -64,8 +64,8 @@ if __name__ == "__main__":
         pdesc = radical.pilot.ComputePilotDescription()
         pdesc.resource = "localhost"
         pdesc.runtime  = 5 # minutes
-        pdesc.cores    = 2
-        pdesc.cleanup  = True
+        pdesc.cores    = 1
+        pdesc.cleanup  = False
 
         # Launch the pilot.
         pilot = pmgr.submit_pilots(pdesc)
@@ -83,16 +83,16 @@ if __name__ == "__main__":
         #
         compute_units = []
 
-        for unit_count in range(0, 16):
+        for unit_count in range(0, 1):
             cu = radical.pilot.ComputeUnitDescription()
             cu.environment = {"INPUT1": "file1.dat", "INPUT2": "file2.dat"}
-            cu.pre_exec    = ["touch /tmp/pre_test.%d" % unit_count]
-            cu.post_exec   = ["touch /tmp/post_test_1.%d" % unit_count, 
-                              "touch /tmp/post_test_2.%d" % unit_count, ]
-            cu.executable  = "/bin/cat"
+          # cu.pre_exec    = ["touch /tmp/pre_test.%d" % unit_count]
+          # cu.post_exec   = ["touch /tmp/post_test_1.%d" % unit_count, 
+          #                   "touch /tmp/post_test_2.%d" % unit_count, ]
+            cu.executable  = "/bin/echo"
             cu.arguments   = ["$INPUT1", "$INPUT2"]
             cu.cores       = 1
-            cu.input_data  = ["./file1.dat", "./file2.dat"]
+          # cu.input_data  = ["./file1.dat", "./file2.dat"]
 
             compute_units.append(cu)
 
@@ -114,6 +114,9 @@ if __name__ == "__main__":
         # PilotManager. This will trigger the selected scheduler to start
         # assigning ComputeUnits to the ComputePilots.
         units = umgr.submit_units(compute_units)
+
+        if  not isinstance(units, list) :
+            units = [units]
 
         # Wait for all compute units to reach a terminal state (DONE or FAILED).
         umgr.wait_units()
