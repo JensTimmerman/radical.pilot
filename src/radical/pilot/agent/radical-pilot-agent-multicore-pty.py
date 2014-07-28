@@ -110,11 +110,14 @@ DONE                        = 'Done'
 CANCELED                    = 'Canceled'
 FAILED                      = 'Failed'
 
+FINAL_STATES                = [DONE, FAILED, CANCELED]
+
 # ComputePilot States
 PENDING_LAUNCH              = 'PendingLaunch'
 LAUNCHING                   = 'Launching'
 PENDING_ACTIVE              = 'PendingActive'
 ACTIVE                      = 'Active'
+
 
 # ComputeUnit States
 NEW                         = 'New'
@@ -1372,7 +1375,7 @@ class ExecWorker (object):
     def monitor (self) :
 
         MONITOR_TIMEOUT  = 1.0    # check for stop signal now and then
-        unhandled_events = list() # keep track of events which arrived
+        unhandled_events = dict() # keep track of events which arrived
                                   # before the job was known...
 
         ret, out, _ = self.monitor_shell.run_sync \
@@ -1390,104 +1393,131 @@ class ExecWorker (object):
         while True :
 
             _, out = self.monitor_shell.find (['\n'], timeout=MONITOR_TIMEOUT)
-            line   = out.strip ()
+            out    = out.strip()
 
-            if  not line :
+            if  out :
+                lines = out.split ('\n')
 
+            else :
                 # timed out -- i.e. an opportunity for checking self.terminate
                 if  self.terminate :
                     self.logger.debug ("stop monitor")
                     return
 
                 # its also a chance to feed a previous event
-                if  unhandled_events :
-                    line = unhandled_events.pop (0)
-                    self.logger.debug ('retry event: %s' % line)
+                if  unhandled_events.keys () :
+
+                    lines = list()
+                    for pid in unhandled_events :
+                        for [state, rc] in unhandled_events[pid] :
+                            lines.append ("%s:%s:%s" % (pid, state, rc))
+                    self.logger.debug ('recheck %s events' % len (lines))
+
                 else :
                     # no termination, no unhandled event - read pipe again
                     continue
 
 
-            if  line == 'EXIT' or line == "Killed" :
-                self.logger.error ("monitor failed - disable notifications")
-                return
+            for line in lines :
 
+                line = line.strip ()
 
-            elif not ':' in line :
-                self.logger.warn ("monitor noise: %s" % line)
+                if  line == 'EXIT' or line == "Killed" :
+                    self.logger.error ("monitor failed - disable notifications")
+                    return
 
+                elif not ':' in line :
+                    self.logger.warn ("monitor noise: %s" % line)
 
-            else :
-
-                pid, state, rc = line.split (':', 2)
-                state          = string_to_state (state)
-                task           = self.running_tasks.get (pid, None)
-
-                self.logger.info ("monitored state: %s - %s (%s)", pid, state, line)
-
-                if  not task :
-                    self.logger.warn ("%s" % self.running_tasks.keys ())
-                    self.logger.warn ("event for unknown pid %s" % pid)
-                    unhandled_events.append (line)
-                    continue
-
-                # before doing anything else, let the launcher know that
-                # there are new free slots...
-                self.change_slot_states (task.slots, FREE)
-
-                # we don't get any notifications which leaves the task
-                # running -- so assume its dead now...
-                del self.running_tasks[task.pid]
-
-                # update return code if available (not be on cancel etc)
-                if  rc :
-                    task.exit_code = int (rc)
-
-
-                # failed, canceled or unknown jobs need no post processing
-                # but just a status update
-                if  state is not DONE :
-
-                    task.state = state
-
-                # task is done -- upload stdout/stderr if needed
                 else :
+                    pid, state, rc = line.split (':', 2)
+                    state          = string_to_state (state)
+                    task           = self.running_tasks.get (pid, None)
 
-                    task.state = DONE
-                    if  task.output_data :
-                        state = PENDING_OUTPUT_TRANSFER
-                    else:
-                        state = DONE
+                    if  not rc : 
+                        rc = ''
 
-                    # upload stdout and stderr via GridFS
-                    workdir   = task.workdir
-                    stdout_id = None
-                    stderr_id = None
+                    self.logger.debug ("monitor: %s - %s (%s)", pid, state, line)
 
-                    # FIXME: use actual stdout/stdin from task if set
-                    stdout = "%s/STDOUT" % workdir
-                    stderr = "%s/STDERR" % workdir
+                    if  not task :
+                        self.logger.warn ("%s" % self.running_tasks.keys ())
+                        self.logger.warn ("event for unknown pid %s" % pid)
 
-                    if  op.isfile (stdout) :
-                        fs = gridfs.GridFS (self.mongo_db)
-                        with open (stdout, 'r') as f :
-                            stdout_id = fs.put (f.read(), filename=stdout)
-                            self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                           % (stdout, str(stdout_id)))
+                        if  pid not in unhandled_events :
+                            unhandled_events[pid] = list()
+                        unhandled_events[pid].append ([state, rc])
 
-                    if op.isfile (stderr) :
-                        fs = gridfs.GridFS (self.mongo_db)
-                        with open (stderr, 'r') as f :
-                            stderr_id = fs.put (f.read(), filename=stderr)
-                            self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                           % (stderr, str(stderr_id)))
-
-                    task.stdout_id = stdout_id
-                    task.stderr_id = stderr_id
+                        continue
 
 
-                # DONE or NOT DONE: tell it to the mountain
-                self.updater_queue.put ([task, timestamp()])
+                    events = list()
+                    if  pid in unhandled_events :
+
+                        events = unhandled_events[pid]
+                        del unhandled_events[pid]
+
+                        for [state, rc] in events :
+                            self.logger.debug ("revise: %s - %s - %s", pid, state, rc)
+
+                    events.append ([state, rc])
+
+                    for [state, rc] in events :
+
+                        self.logger.info ("event : %s - %s - %s", pid, state, rc)
+                        task.state = state
+
+                        if  state in  FINAL_STATES :
+
+                            # before doing anything else, let the launcher know
+                            # that there are new free slots...
+                            self.change_slot_states (task.slots, FREE)
+
+                            # after final states, we don't expect to get any new
+                            # notifications ... 
+                            del self.running_tasks[task.pid]
+                            known_tasks.append (task.pid)
+
+                            # update return code if available (not be on cancel etc)
+                            if  rc :
+                                task.exit_code = int (rc)
+
+
+                        # failed, canceled or unknown jobs need no post processing
+                        # but just a status update.  DONE OTOH needs more
+                        # action:
+                        if  state == DONE :
+
+                            if  task.output_data :
+                                task.state = PENDING_OUTPUT_TRANSFER
+
+                            # upload stdout and stderr via GridFS
+                            workdir   = task.workdir
+                            stdout_id = None
+                            stderr_id = None
+
+                            # FIXME: use actual stdout/stdin from task if set
+                            stdout = "%s/STDOUT" % workdir
+                            stderr = "%s/STDERR" % workdir
+
+                            if  op.isfile (stdout) :
+                                fs = gridfs.GridFS (self.mongo_db)
+                                with open (stdout, 'r') as f :
+                                    stdout_id = fs.put (f.read(), filename=stdout)
+                                    self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                                   % (stdout, str(stdout_id)))
+
+                            if op.isfile (stderr) :
+                                fs = gridfs.GridFS (self.mongo_db)
+                                with open (stderr, 'r') as f :
+                                    stderr_id = fs.put (f.read(), filename=stderr)
+                                    self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                                   % (stderr, str(stderr_id)))
+
+                            task.stdout_id = stdout_id
+                            task.stderr_id = stderr_id
+
+                    # DONE or NOT DONE: tell it to the mountain
+                    self.updater_queue.put ([task, timestamp()])
 
 
     # --------------------------------------------------------------------------
