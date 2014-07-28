@@ -1202,6 +1202,7 @@ class Task (object):
         self.stderr_id      = None
 
         self.log            = list()
+        self.events         = list()
         self.pid            = None
 
 
@@ -1328,15 +1329,19 @@ class ExecWorker (object):
 
                         # task spawned ok -- schedule for state updates
                         task.state = EXECUTING
+                        task.events.append ({'state'     : task.state, 
+                                             'timestamp' : timestamp()})
                         self.running_tasks[task.pid] = task
-                        self.updater_queue.put ([task, timestamp()])
+                        self.updater_queue.put (task)
                         self.logger.info ("launched task: %s - %s", task.uid, task.pid)
 
                     elif ret == FAIL :
 
                         # no game -- schedule for state updates
                         task.state = FAILED
-                        self.updater_queue.put ([task, timestamp()])
+                        task.events.append ({'state'     : task.state, 
+                                             'timestamp' : timestamp()})
+                        self.updater_queue.put (task)
 
                     elif ret == RETRY :
 
@@ -1377,6 +1382,7 @@ class ExecWorker (object):
         MONITOR_TIMEOUT  = 1.0    # check for stop signal now and then
         unhandled_events = dict() # keep track of events which arrived
                                   # before the job was known...
+        known_tasks      = list() # tasks we have seen before at some point
 
         ret, out, _ = self.monitor_shell.run_sync \
                           (" /bin/sh %s/radical-pilot-agent-ptywrapper.sh $$ %s" \
@@ -1389,6 +1395,69 @@ class ExecWorker (object):
         self.logger.debug ("monitor startup: %s" % out)
 
         self.monitor_shell.run_async ("MONITOR")
+
+        # ----------------------------------------------------------------------
+        def handle_event (task, state, rc, ts) :
+
+            self.logger.info ("handle : %s - %s - %s - %s", pid, state, rc, ts)
+
+            task.events.append ({'state'     : state, 
+                                 'timestamp' : ts})
+
+            if  task.state not in FINAL_STATES :
+                task.state = state
+
+            if  state in FINAL_STATES :
+
+                # update return code if available (not be on cancel etc)
+                if  rc :
+                    task.exit_code = int (rc)
+
+                # before doing anything else, let the launcher know
+                # that there are new free slots...
+                self.change_slot_states (task.slots, FREE)
+
+                # after final states, we don't expect to get any new
+                # notifications ... 
+                del self.running_tasks[task.pid]
+                known_tasks.append (task.pid)
+
+
+            # failed, canceled or unknown jobs need no post processing
+            # but just a status update.  DONE OTOH needs more
+            # action:
+            if  state == DONE :
+
+                if  task.output_data :
+                    task.state = PENDING_OUTPUT_TRANSFER
+
+                # upload stdout and stderr via GridFS
+                workdir   = task.workdir
+                stdout_id = None
+                stderr_id = None
+
+                # FIXME: use actual stdout/stdin from task if set
+                stdout = "%s/STDOUT" % workdir
+                stderr = "%s/STDERR" % workdir
+
+                if  op.isfile (stdout) :
+                    fs = gridfs.GridFS (self.mongo_db)
+                    with open (stdout, 'r') as f :
+                        stdout_id = fs.put (f.read(), filename=stdout)
+                        self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                       % (stdout, str(stdout_id)))
+
+                if op.isfile (stderr) :
+                    fs = gridfs.GridFS (self.mongo_db)
+                    with open (stderr, 'r') as f :
+                        stderr_id = fs.put (f.read(), filename=stderr)
+                        self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                       % (stderr, str(stderr_id)))
+
+                task.stdout_id = stdout_id
+                task.stderr_id = stderr_id
+        # ----------------------------------------------------------------------
+
 
         while True :
 
@@ -1407,15 +1476,38 @@ class ExecWorker (object):
                 # its also a chance to feed a previous event
                 if  unhandled_events.keys () :
 
-                    lines = list()
-                    for pid in unhandled_events :
-                        for [state, rc] in unhandled_events[pid] :
-                            lines.append ("%s:%s:%s" % (pid, state, rc))
-                    self.logger.debug ('recheck %s events' % len (lines))
+                    # sorry for the python array semi-shallow copy magic...
+                    for pid in unhandled_events.keys()[:] :
 
-                else :
-                    # no termination, no unhandled event - read pipe again
-                    continue
+                        self.logger.debug ('recheck events for %s' % pid)
+                        if  pid not in self.running_tasks :
+
+                            if  pid in known_tasks :
+                                # we saw this task before though -- it will not come
+                                # back...  discard/ignore event
+                                self.logger.debug ('discard as old event')
+                                del unhandled_events[pid]
+
+                            else :
+                                # task not known -- still can't do nothing
+                                self.logger.debug ('%s is not known' % pid)
+
+                        else :
+
+                            # task is now known!  Handle events...
+
+                            task = self.running_tasks[pid]
+
+                            for [state, rc, ts] in unhandled_events[pid] :
+
+                                self.logger.debug  ('%s is handled' % pid)
+                                handle_event (task, state, rc, ts)
+
+                            self.updater_queue.put (task)
+                            del unhandled_events[pid]
+
+                # no termination, unhandled events handled -- read pipe again
+                continue
 
 
             for line in lines :
@@ -1430,6 +1522,7 @@ class ExecWorker (object):
                     self.logger.warn ("monitor noise: %s" % line)
 
                 else :
+                    ts             = timestamp()
                     pid, state, rc = line.split (':', 2)
                     state          = string_to_state (state)
                     task           = self.running_tasks.get (pid, None)
@@ -1443,81 +1536,35 @@ class ExecWorker (object):
                         self.logger.warn ("%s" % self.running_tasks.keys ())
                         self.logger.warn ("event for unknown pid %s" % pid)
 
+                        # keep this around until the task appears
                         if  pid not in unhandled_events :
                             unhandled_events[pid] = list()
-                        unhandled_events[pid].append ([state, rc])
 
-                        continue
+                        unhandled_events[pid].append ([state, rc, ts])
+                        self.logger.debug ('keep as future event')
 
+                    else :
 
-                    events = list()
-                    if  pid in unhandled_events :
+                        # that is a task we know...  Check if we have other
+                        # events for it...
+                        events = list()
 
-                        events = unhandled_events[pid]
-                        del unhandled_events[pid]
+                        # sorry for the python array semi-shallow copy magic...
+                        if  pid in unhandled_events.keys ()[:] :
 
-                        for [state, rc] in events :
-                            self.logger.debug ("revise: %s - %s - %s", pid, state, rc)
+                            events = unhandled_events[pid]
+                            del unhandled_events[pid]
 
-                    events.append ([state, rc])
+                            for [state, rc, ts] in events :
+                                self.logger.debug ("revise : %s - %s - %s - %s", pid, state, rc, ts)
 
-                    for [state, rc] in events :
+                        events.append ([state, rc, ts])
 
-                        self.logger.info ("event : %s - %s - %s", pid, state, rc)
-                        task.state = state
+                        for [state, rc, ts] in events :
 
-                        if  state in  FINAL_STATES :
+                            handle_event (task, state, rc, ts)
 
-                            # before doing anything else, let the launcher know
-                            # that there are new free slots...
-                            self.change_slot_states (task.slots, FREE)
-
-                            # after final states, we don't expect to get any new
-                            # notifications ... 
-                            del self.running_tasks[task.pid]
-                            known_tasks.append (task.pid)
-
-                            # update return code if available (not be on cancel etc)
-                            if  rc :
-                                task.exit_code = int (rc)
-
-
-                        # failed, canceled or unknown jobs need no post processing
-                        # but just a status update.  DONE OTOH needs more
-                        # action:
-                        if  state == DONE :
-
-                            if  task.output_data :
-                                task.state = PENDING_OUTPUT_TRANSFER
-
-                            # upload stdout and stderr via GridFS
-                            workdir   = task.workdir
-                            stdout_id = None
-                            stderr_id = None
-
-                            # FIXME: use actual stdout/stdin from task if set
-                            stdout = "%s/STDOUT" % workdir
-                            stderr = "%s/STDERR" % workdir
-
-                            if  op.isfile (stdout) :
-                                fs = gridfs.GridFS (self.mongo_db)
-                                with open (stdout, 'r') as f :
-                                    stdout_id = fs.put (f.read(), filename=stdout)
-                                    self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                                   % (stdout, str(stdout_id)))
-
-                            if op.isfile (stderr) :
-                                fs = gridfs.GridFS (self.mongo_db)
-                                with open (stderr, 'r') as f :
-                                    stderr_id = fs.put (f.read(), filename=stderr)
-                                    self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                                   % (stderr, str(stderr_id)))
-
-                            task.stdout_id = stdout_id
-                            task.stderr_id = stderr_id
-
-                    # DONE or NOT DONE: tell it to the mountain
-                    self.updater_queue.put ([task, timestamp()])
+                        self.updater_queue.put (task)
 
 
     # --------------------------------------------------------------------------
@@ -1540,7 +1587,7 @@ class ExecWorker (object):
             push_bulks = False
 
             try :
-                task, ts = self.updater_queue.get (block=True, timeout=1)
+                task = self.updater_queue.get (block=True, timeout=1)
 
                 # AM: FIXME: this needs to become a bulk op
                 bulk_w.find   ({"_id"  : ObjectId(task.uid)}) \
@@ -1549,9 +1596,9 @@ class ExecWorker (object):
                                           "exit_code"   : task.exit_code,
                                           "stdout_id"   : task.stdout_id,
                                           "stderr_id"   : task.stderr_id},
-                                "$push": {"statehistory": {"state"    : task.state,
-                                                           "timestamp": ts}}
+                                "$push": {"statehistory": {"$each" : task.events}}
                                })
+                task.events = list()
                 cnt_w += 1
 
                 # Update capabilities on monitored, launched and failed tasks
@@ -1565,8 +1612,10 @@ class ExecWorker (object):
 
                 # make sure we push now and then, even if there are new events
                 # pending...
-                if  cnt_w > 100 or cnt_p > 10 :
+                if  cnt_w > 100 :
                     push_bulks = True
+              # if  cnt_p > 10 :
+              #     push_bulks = True
 
             except Queue.Empty :
 
