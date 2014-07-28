@@ -1371,7 +1371,9 @@ class ExecWorker (object):
     #
     def monitor (self) :
 
-        MONITOR_READ_TIMEOUT = 1.0   # check for stop signal now and then
+        MONITOR_TIMEOUT  = 1.0    # check for stop signal now and then
+        unhandled_events = list() # keep track of events which arrived
+                                  # before the job was known...
 
         ret, out, _ = self.monitor_shell.run_sync \
                           (" /bin/sh %s/radical-pilot-agent-ptywrapper.sh $$ %s" \
@@ -1387,8 +1389,7 @@ class ExecWorker (object):
 
         while True :
 
-            _, out = self.monitor_shell.find (['\n'],
-                                               timeout=MONITOR_READ_TIMEOUT)
+            _, out = self.monitor_shell.find (['\n'], timeout=MONITOR_TIMEOUT)
             line   = out.strip ()
 
             if  not line :
@@ -1398,8 +1399,16 @@ class ExecWorker (object):
                     self.logger.debug ("stop monitor")
                     return
 
+                # its also a chance to feed a previous event
+                if  unhandled_events :
+                    line = unhandled_events.pop (0)
+                    self.logger.debug ('retry event: %s' % line)
+                else :
+                    # no termination, no unhandled event - read pipe again
+                    continue
 
-            elif line == 'EXIT' or line == "Killed" :
+
+            if  line == 'EXIT' or line == "Killed" :
                 self.logger.error ("monitor failed - disable notifications")
                 return
 
@@ -1417,7 +1426,9 @@ class ExecWorker (object):
                 self.logger.info ("monitored state: %s - %s (%s)", pid, state, line)
 
                 if  not task :
+                    self.logger.warn ("%s" % self.running_tasks.keys ())
                     self.logger.warn ("event for unknown pid %s" % pid)
+                    unhandled_events.append (line)
                     continue
 
                 # before doing anything else, let the launcher know that
