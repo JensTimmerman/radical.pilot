@@ -76,7 +76,7 @@ class OutputFileTransferWorker(multiprocessing.Process):
 
             if compute_unit is None:
                 # Sleep a bit if no new units are available.
-                time.sleep(1)
+                time.sleep(0.1)
             else:
                 # AM: The code below seems wrong when BULK_LIMIT != 1 -- the
                 # compute_unit will be a list then I assume.

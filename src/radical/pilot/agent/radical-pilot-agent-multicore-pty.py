@@ -25,7 +25,7 @@ import logging
 import datetime
 import hostlist
 import traceback
-import threading 
+import threading
 import subprocess
 import multiprocessing
 import radical.utils        as ru
@@ -40,17 +40,32 @@ from   bson.objectid import ObjectId
 #
 # ==============================================================================
 #
-# - purge CU on ptywrapper level after reaching final state (?)
-# - pid overrun on pty layer?
-# - job_service startup (pilot state check, others) will purge all final tasks
-#   -- racing with notifications
+# - purge CU on ptywrapper level after reaching final state
 # - RP: canceling many jobs onb shutdown is not done in bulk (and it shows)
-
+# - there is race condition between task startup and registering the created
+#   task in running_tasks -- the monitoring thread can pick up the RUNNING event
+#   meanwhile:
+#     AGENT.STDERR:2014:07:27 10:53:14 28434  Thread-2  radical.pilot.agent   :
+#                  [DEBUG   ] read : [   16] [   15] (454:RUNNING: \n)
+#     AGENT.STDERR:2014:07:27 10:53:14 28434  Thread-2  radical.pilot.agent   :
+#                  [INFO    ] monitored state: 454 - Unknown (454:RUNNING:)
+#     AGENT.STDERR:2014:07:27 10:53:14 28434  Thread-2  radical.pilot.agent   :
+#                  [WARNING ] event for unknown pid 454
+#     AGENT.STDERR:2014:07:27 10:53:14 28434  Thread-1  radical.pilot.agent   :
+#                  [DEBUG   ] read : [   15] [   63]
+#                  (RUNNING \nOK\n454\nPROMPT-0->\nOK\nBULK COMPLETED\nPROMPT-0->\n)
+#     AGENT.STDERR:2014:07:27 10:53:14 28434  Thread-1  radical.pilot.agent   :
+#                  [INFO    ] launched task: 53d4bdda74df926a353821ab - 454
+# - agent shutdown does not always kill ptywrapper.sh instances
+# - RP is not forcing indexes on the DB, at all...
+#
+#
 # ==============================================================================
 #
 # CONSTANTS
 #
 # ==============================================================================
+#
 OK                          = "OK"
 FAIL                        = "FAIL"
 RETRY                       = "RETRY"
@@ -66,13 +81,13 @@ LAUNCH_METHOD_APRUN         = 'APRUN'
 LAUNCH_METHOD_IBRUN         = 'IBRUN'
 LAUNCH_METHOD_POE           = 'POE'
 
-MULTI_NODE_LAUNCH_METHODS   =  [LAUNCH_METHOD_MPIRUN,
-                                LAUNCH_METHOD_MPIEXEC, 
-                                LAUNCH_METHOD_POE,
-                                LAUNCH_METHOD_APRUN,
-                                LAUNCH_METHOD_IBRUN]
+MULTI_NODE_LAUNCH_METHODS   = [LAUNCH_METHOD_MPIRUN,
+                               LAUNCH_METHOD_MPIEXEC,
+                               LAUNCH_METHOD_POE,
+                               LAUNCH_METHOD_APRUN,
+                               LAUNCH_METHOD_IBRUN]
 
-CONT_SLOTS_LAUNCH_METHODS   =  [LAUNCH_METHOD_IBRUN]
+CONT_SLOTS_LAUNCH_METHODS   = [LAUNCH_METHOD_IBRUN]
 
 LRMS_NAME_TORQUE            = 'TORQUE'
 LRMS_NAME_PBSPRO            = 'PBSPRO'
@@ -119,7 +134,7 @@ UNKNOWN                     = 'Unknown'
 
 # ==============================================================================
 #
-# Helper Methods 
+# Helper Methods
 #
 # ------------------------------------------------------------------------------
 #
@@ -241,10 +256,12 @@ def parse_commandline () :
 def string_to_state (state_str) :
 
     state_str = state_str.strip ()
+    state_str = state_str.lower ()
 
-    if state_str.lower () == 'done'      : return DONE
-    if state_str.lower () == 'failed'    : return FAILED
-    if state_str.lower () == 'canceled'  : return CANCELED
+    if state_str == 'running'  : return EXECUTING
+    if state_str == 'done'     : return DONE
+    if state_str == 'failed'   : return FAILED
+    if state_str == 'canceled' : return CANCELED
 
     return UNKNOWN
 
@@ -254,13 +271,13 @@ def string_to_state (state_str) :
 def pilot_FAILED (mongo_p, pilot_uid, logger, message) :
 
     traceback.print_stack ()
-    logger.error (message)      
+    logger.error (message)
 
-    mongo_p.update ({"_id"  : ObjectId(pilot_uid)}, 
+    mongo_p.update ({"_id"  : ObjectId(pilot_uid)},
                     {"$set" : {"state"       : 'Failed',
                                "capability"  : 0},
                      "$push": {"log"         : message,
-                               "statehistory": {"state"    : 'Failed', 
+                               "statehistory": {"state"    : 'Failed',
                                                 "timestamp": timestamp()}}
                     })
 
@@ -273,11 +290,11 @@ def pilot_CANCELED (mongo_p, pilot_uid, logger, message) :
 
     logger.info (message)
 
-    mongo_p.update ({"_id"   : ObjectId(pilot_uid)}, 
+    mongo_p.update ({"_id"   : ObjectId(pilot_uid)},
                     {"$set"  : {"state"        : 'Canceled',
                                 "capability"   : 0},
                      "$push" : {"log"          : message,
-                                "statehistory" : {"state"     : 'Canceled', 
+                                "statehistory" : {"state"     : 'Canceled',
                                                   "timestamp" : timestamp()}}
                     })
 
@@ -287,18 +304,18 @@ def pilot_CANCELED (mongo_p, pilot_uid, logger, message) :
 # ------------------------------------------------------------------------------
 #
 def pilot_DONE (mongo_p, pilot_uid, logger):
-    
+
     """Updates the state of one or more pilots.
     """
 
     logger.info ("Pilot Done")
 
-    mongo_p.update({"_id"   : ObjectId(pilot_uid)}, 
-                   {"$set"  : {"state"        : 'Done',
-                               "capability"   : 0},
-                    "$push" : {"statehistory" : {"state"     : 'Done', 
-                                                 "timestamp" : timestamp()}}
-                   })
+    mongo_p.update ({"_id"   : ObjectId(pilot_uid)},
+                    {"$set"  : {"state"        : 'Done',
+                                "capability"   : 0},
+                     "$push" : {"statehistory" : {"state"     : 'Done',
+                                                  "timestamp" : timestamp()}}
+                    })
 
     sys.exit (0)
 
@@ -307,7 +324,7 @@ def pilot_DONE (mongo_p, pilot_uid, logger):
 #
 def log_raise (logger, exception, message, *args) :
 
-    logger.error    (traceback.format_exc())
+    logger.error    (traceback.format_exc ())
     logger.error    (message, *args)
     traceback.print_stack ()
     raise exception (message % args)
@@ -322,13 +339,14 @@ def timestamp () :
 
 # ==============================================================================
 #
-# Launch Methods 
+# Launch Methods
 #
 # ==============================================================================
 #
 class LaunchMethod (object) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, launch_method, logger) :
 
         self.name   = launch_method
@@ -343,13 +361,14 @@ class LaunchMethod (object) :
                       }.get (launch_method, None)
 
         if  not impl_class :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Unknown LaunchMethod '%s'", launch_method)
 
         self.impl = impl_class (logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         return self.impl.command (slots, lrms, cores)
@@ -376,6 +395,7 @@ class LaunchMethodBase (object) :
 class LaunchMethodLocal (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -384,6 +404,7 @@ class LaunchMethodLocal (LaunchMethodBase) :
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         return self.cmd
@@ -394,6 +415,7 @@ class LaunchMethodLocal (LaunchMethodBase) :
 class LaunchMethodSSH (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -401,10 +423,10 @@ class LaunchMethodSSH (LaunchMethodBase) :
         self.cmd = ru.which ('ssh')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'ssh' in path")
 
-        # Some MPI environments (e.g. SGE) put a link to rsh as "ssh" into 
+        # Some MPI environments (e.g. SGE) put a link to rsh as "ssh" into
         # the path.  We try to detect that and then use different arguments.
         if  op.islink (self.cmd) and \
             op.basename (op.realpath (self.cmd)) == 'rsh' :
@@ -414,10 +436,11 @@ class LaunchMethodSSH (LaunchMethodBase) :
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         # Get the host of the first entry in the acquired slot
-        host = slots[0].split(':')[0] 
+        host = slots[0].split(':')[0]
         cmd  = "%s %s" % (self.cmd, host)
 
         return cmd
@@ -428,6 +451,7 @@ class LaunchMethodSSH (LaunchMethodBase) :
 class LaunchMethodMPIRUN (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -439,11 +463,12 @@ class LaunchMethodMPIRUN (LaunchMethodBase) :
             self.cmd = ru.which ('mpirun-openmpi-mp')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'mpirun' in path")
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         # Construct the hosts_string
@@ -462,6 +487,7 @@ class LaunchMethodMPIRUN (LaunchMethodBase) :
 class LaunchMethodMPIEXEC (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -469,11 +495,12 @@ class LaunchMethodMPIEXEC (LaunchMethodBase) :
         self.cmd = ru.which ('mpiexec')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'mpiexec' in path")
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         # Construct the hosts_string
@@ -492,6 +519,7 @@ class LaunchMethodMPIEXEC (LaunchMethodBase) :
 class LaunchMethodAPRUN (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -499,11 +527,12 @@ class LaunchMethodAPRUN (LaunchMethodBase) :
         self.cmd = ru.which ('aprun')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'aprun' in path")
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         cmd = "%s -n %s" % (self.cmd, cores)
@@ -516,6 +545,7 @@ class LaunchMethodAPRUN (LaunchMethodBase) :
 class LaunchMethodIBRUN (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -523,11 +553,12 @@ class LaunchMethodIBRUN (LaunchMethodBase) :
         self.cmd = ru.which ('ibrun')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'ibrun' in path")
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         # NOTE: Don't think that with IBRUN it is possible to have
@@ -556,6 +587,7 @@ class LaunchMethodIBRUN (LaunchMethodBase) :
 class LaunchMethodPOE (LaunchMethodBase) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, logger) :
 
         LaunchMethodBase.__init__ (self, logger)
@@ -563,11 +595,12 @@ class LaunchMethodPOE (LaunchMethodBase) :
         self.cmd = ru.which ('poe')
 
         if  not self.cmd :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Could not find 'poe' in path")
 
 
     # --------------------------------------------------------------------------
+    #
     def command (self, lrms, slots, cores) :
 
         # Count slots per host in provided slots description.
@@ -601,6 +634,7 @@ class LaunchMethodPOE (LaunchMethodBase) :
 class LRMS (object) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, lrms, requested_cores, logger) :
 
         self.name            = lrms
@@ -615,7 +649,7 @@ class LRMS (object) :
                       LRMS_NAME_SGE    : LRMS_SGE    ,
                       LRMS_NAME_LSF    : LRMS_LSF    ,
                       LRMS_NAME_LOADL  : LRMS_LOADL  ,
-                      LRMS_NAME_FORK   : LRMS_FORK   
+                      LRMS_NAME_FORK   : LRMS_FORK
                      }.get (lrms, None)
 
         if  not impl_class :
@@ -637,10 +671,10 @@ class LRMS (object) :
         # Slots are either BUSY or FREE.
 
         for node in self.node_list :
-            
+
             # FIXME: use real core numbers for non-exclusive host reservations
             self.slot_list.append ({'node' : node,
-                                    'cores': [FREE for _ in range (0, self.cores_per_node)] 
+                                    'cores': [FREE for _ in range (0, self.cores_per_node)]
                                    })
 
 
@@ -649,6 +683,7 @@ class LRMS (object) :
 class LRMS_Base (object) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         self.name            = name
@@ -660,22 +695,25 @@ class LRMS_Base (object) :
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         raise NotImplementedError ("invalid LRMS type")
 
 
 # ==============================================================================
-# 
+#
 class LRMS_FORK (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         detected_cpus = multiprocessing.cpu_count()
@@ -689,16 +727,18 @@ class LRMS_FORK (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_TORQUE (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         torque_nodefile = os.environ.get('PBS_NODEFILE', None)
@@ -721,14 +761,14 @@ class LRMS_TORQUE (LRMS_Base) :
         torque_cores_per_node = os.environ.get('PBS_NUM_PPN', None)
         if  torque_cores_per_node is None :
             self.logger.warning("$PBS_NUM_PPN not set! (old Torque version?)")
-        else : 
+        else :
             torque_cores_per_node = int(torque_cores_per_node)
 
         # Number of entries in nodefile should be PBS_NUM_NODES * PBS_NUM_PPN
         torque_nodes_length = len(torque_nodes)
         if  torque_num_nodes and torque_cores_per_node and \
             torque_nodes_length != torque_num_nodes * torque_cores_per_node :
-            log_raise (self.logger, Exception, 
+            log_raise (self.logger, Exception,
                        "Number of entries in $PBS_NODEFILE (%s) does " \
                        "not match $PBS_NUM_NODES*$PBS_NUM_PPN (%s*%s)", \
                        torque_nodes_length, torque_nodes, torque_cores_per_node)
@@ -737,7 +777,7 @@ class LRMS_TORQUE (LRMS_Base) :
         torque_node_list        = list(set(torque_nodes))
         torque_node_list_length = len(torque_node_list)
 
-        self.logger.debug ("Node list: %s(%d)" 
+        self.logger.debug ("Node list: %s(%d)"
                         % (torque_node_list, torque_node_list_length))
 
         self.node_list = torque_node_list
@@ -750,16 +790,18 @@ class LRMS_TORQUE (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_PBSPRO (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         # TODO: $NCPUS?!?! = 1 on archer
@@ -804,6 +846,7 @@ class LRMS_PBSPRO (LRMS_Base) :
 
 
     # --------------------------------------------------------------------------
+    #
     def parse_pbspro_vnodes(self):
 
         # PBS Job ID
@@ -880,16 +923,18 @@ class LRMS_PBSPRO (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_SLURM (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         # Parse SLURM nodefile environment variable
@@ -935,16 +980,18 @@ class LRMS_SLURM (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_SGE (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         sge_hostfile = os.environ.get('PE_HOSTFILE', None)
@@ -952,7 +999,7 @@ class LRMS_SGE (LRMS_Base) :
             log_raise (self.logger, Exception, "$PE_HOSTFILE not set!")
 
         # SGE core configuration might be different than what multiprocessing
-        # announces 
+        # announces
         # Alternative: "qconf -sq all.q|awk '/^slots *[0-9]+$/{print $2}'"
 
         # Parse SGE hostfile for nodes, keep only unique nodes
@@ -974,16 +1021,18 @@ class LRMS_SGE (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_LSF (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         lsf_hostfile = os.environ.get('LSB_DJOB_HOSTFILE', None)
@@ -1001,7 +1050,7 @@ class LRMS_LSF (LRMS_Base) :
         # <hostnameY>
         # <hostnameY>
         #
-        # There are in total "-n" entries (number of tasks) and "-R" entries 
+        # There are in total "-n" entries (number of tasks) and "-R" entries
         # per host (tasks per host).  (That results in "-n" / "-R" unique hosts)
         #
         lsf_nodes     = [line.strip() for line in open(lsf_hostfile)]
@@ -1023,16 +1072,18 @@ class LRMS_LSF (LRMS_Base) :
 
 
 # ==============================================================================
-# 
+#
 class LRMS_LOADL (LRMS_Base) :
 
     # --------------------------------------------------------------------------
+    #
     def __init__ (self, name, requested_cores, logger) :
 
         LRMS_Base.__init__ (self, name, requested_cores, logger)
 
 
     # --------------------------------------------------------------------------
+    #
     def configure (self) :
 
         #LOADL_HOSTFILE
@@ -1048,7 +1099,7 @@ class LRMS_LOADL (LRMS_Base) :
         loadl_total_tasks   = int(loadl_total_tasks_str)
         loadl_nodes         = [line.strip() for line in open(loadl_hostfile)]
         loadl_node_list     = list(set(loadl_nodes))
-        # Assume: 
+        # Assume:
         # cores_per_node    = lenght(nodefile) / len(unique_nodes_in_nodefile)
         loadl_cpus_per_node = len(loadl_nodes) / len(loadl_node_list)
 
@@ -1076,12 +1127,12 @@ class ExecutionEnvironment(object):
 
     # --------------------------------------------------------------------------
     #
-    def __init__ (self, logger, lrms, requested_cores, 
+    def __init__ (self, logger, lrms, requested_cores,
                  task_launch_method, mpi_launch_method):
 
         self.logger = logger
 
-        # Configure nodes and number of cores available, and 
+        # Configure nodes and number of cores available, and
         # task spawning mechanism
         self.lrms               = LRMS         (lrms, requested_cores, logger)
         self.task_launch_method = LaunchMethod (task_launch_method,    logger)
@@ -1095,11 +1146,11 @@ class ExecutionEnvironment(object):
         # For now assume that all nodes have equal amount of cores
         cores_avail = len(self.lrms.node_list) * self.lrms.cores_per_node
         if  cores_avail < int(requested_cores):
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                                    "Not enough cores available (%s) to " \
                                    "satisfy allocation request (%s).", \
                                    cores_avail, requested_cores)
-            
+
 
 # ==============================================================================
 #
@@ -1110,6 +1161,7 @@ class ExecutionEnvironment(object):
 class Task (object):
 
     # --------------------------------------------------------------------------
+    #
     def __init__(self, uid, wu):
 
         self.logger         = None
@@ -1157,14 +1209,14 @@ class Task (object):
 # ==============================================================================
 #
 class ExecWorker (object):
-    """ 
+    """
     An ExecWorker competes for the execution of tasks in a task queue.
     """
 
     # --------------------------------------------------------------------------
     #
     def __init__ (self, logger, command_queue, exec_env,
-                  mongodb_url, database_name, pilot_id, 
+                  mongodb_url, database_name, pilot_id,
                   session_id, workdir):
 
         self.daemon             = True
@@ -1172,11 +1224,11 @@ class ExecWorker (object):
 
         self.terminate          = False
         self.pilot_id           = pilot_id
-        
+
         self.command_queue      = command_queue # queued commands by the agent
         self.running_tasks      = dict() # Launched tasks by this ExecWorker
 
-        self.workdir            = workdir 
+        self.workdir            = workdir
         self.exec_env           = exec_env
         self.lrms               = self.exec_env.lrms
         self.slots              = self.lrms.slot_list
@@ -1191,9 +1243,9 @@ class ExecWorker (object):
         self.w                  = self.mongo_db["%s.w" % session_id]
 
         # get some threads going -- those will do all the work.
-        self.launcher_shell     = sups.PTYShell ("fork://localhost/", 
+        self.launcher_shell     = sups.PTYShell ("fork://localhost/",
                                                  logger=self.logger)
-        self.monitor_shell      = sups.PTYShell ("fork://localhost/", 
+        self.monitor_shell      = sups.PTYShell ("fork://localhost/",
                                                  logger=self.logger)
 
         # queues toward the updater
@@ -1234,10 +1286,10 @@ class ExecWorker (object):
         self.monitor_thread.join  ()
         self.updater_thread.join  ()
 
-        # we are done -- push slot history 
+        # we are done -- push slot history
         self.p.update(
             {"_id": ObjectId(self.pilot_id)},
-            {"$set": {"slothistory" : self.slot_history, 
+            {"$set": {"slothistory" : self.slot_history,
                       "capability"  : 0,
                       "slots"       : self.slots}}
             )
@@ -1256,7 +1308,7 @@ class ExecWorker (object):
                           % (self.workdir, self.workdir))
 
         if  ret != 0 :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "failed to run launcher bootstrap: (%s)(%s)", ret, out)
 
         while True :
@@ -1307,7 +1359,6 @@ class ExecWorker (object):
                                       command[COMMAND_TYPE])
                     continue
 
-
             except Queue.Empty:
 
                 # timed out -- i.e. an opportunity for checking self.terminate
@@ -1327,7 +1378,7 @@ class ExecWorker (object):
                           % (self.workdir, self.workdir))
 
         if  ret != 0 :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "failed to run monitor bootstrap: (%s)(%s)", ret, out)
 
         self.logger.debug ("monitor startup: %s" % out)
@@ -1336,7 +1387,7 @@ class ExecWorker (object):
 
         while True :
 
-            _, out = self.monitor_shell.find (['\n'], 
+            _, out = self.monitor_shell.find (['\n'],
                                                timeout=MONITOR_READ_TIMEOUT)
             line   = out.strip ()
 
@@ -1381,9 +1432,9 @@ class ExecWorker (object):
                 if  rc :
                     task.exit_code = int (rc)
 
-               
+
                 # failed, canceled or unknown jobs need no post processing
-                # but just a status update 
+                # but just a status update
                 if  state is not DONE :
 
                     task.state = state
@@ -1432,18 +1483,20 @@ class ExecWorker (object):
     #
     def updater (self) :
 
-        """ 
-        Updates database entries for tasks coming through the updater queue.  
         """
-
-        exec_w = False
-      # exec_p = False
+        Updates database entries for tasks coming through the updater queue.
+        """
 
         bulk_w = self.w.initialize_ordered_bulk_op ()
       # bulk_p = self.p.initialize_ordered_bulk_op ()
 
+        cnt_w  = 0
+      # cnt_p  = 0
+
 
         while True :
+
+            push_bulks = False
 
             try :
                 task, ts = self.updater_queue.get (block=True, timeout=1)
@@ -1455,10 +1508,10 @@ class ExecWorker (object):
                                           "exit_code"   : task.exit_code,
                                           "stdout_id"   : task.stdout_id,
                                           "stderr_id"   : task.stderr_id},
-                                "$push": {"statehistory": {"state"    : task.state, 
+                                "$push": {"statehistory": {"state"    : task.state,
                                                            "timestamp": ts}}
                                })
-                exec_w = True
+                cnt_w += 1
 
                 # Update capabilities on monitored, launched and failed tasks
               # self.capability = self.slots2caps(self.lrms)
@@ -1467,31 +1520,41 @@ class ExecWorker (object):
               # bulk_p.find   ({"_id" : ObjectId(self.pilot_id)}) \
               #       .update ({"$set": {"capability" : self.capability}})
               #
-              # exec_p = True
+              # cnt_p += 1
+
+                # make sure we push now and then, even if there are new events
+                # pending...
+                if  cnt_w > 100 or cnt_p > 10 :
+                    push_bulks = True
 
             except Queue.Empty :
 
                 # timed out -- i.e. time to push out the bulk, and an
                 # opportunity for checking self.terminate
+                push_bulks = True
+
+                if  self.terminate :
+                    self.logger.debug ("stop updater")
+                    return
+
+
+
+            if  push_bulks :
 
                 # FIXME: eval result
-                if  exec_w :
-                    exec_w   = False
+                if  cnt_w :
+                    cnt_w    = 0
                     result_w = bulk_w.execute()
                     bulk_w   = self.w.initialize_ordered_bulk_op ()
                     self.logger.info ('pushed bulk_w: %s', result_w)
                     print result_w
 
               # # FIXME: eval result
-              # if  exec_p :
-              #     exec_p   = False
+              # if  cnt_p :
+              #     cnt_p    = 0
               #     result_p = bulk_p.execute()
               #     bulk_p   = self.p.initialize_ordered_bulk_op ()
               #     self.logger.info ('pushed bulk_p: %s', result_p)
-
-                if  self.terminate :
-                    self.logger.debug ("stop updater")
-                    return
 
 
     # --------------------------------------------------------------------------
@@ -1499,7 +1562,7 @@ class ExecWorker (object):
     def cuid2pid (self, cuid) :
         # FIXME: this needs to be optimized -- probably by maintaining an
         # explicit map
-        
+
         for pid in self.running_tasks :
             task = self.running_tasks.get (pid, None)
             if  task and task.uid == cuid :
@@ -1543,8 +1606,8 @@ class ExecWorker (object):
             free_cores, cont, single = caps_tuple
             count     = all_caps_tuples[caps_tuple]
             caps_dict = {'free_cores'  : free_cores,
-                         'continuous'  : cont, 
-                         'single_node' : single, 
+                         'continuous'  : cont,
+                         'single_node' : single,
                          'count'       : count}
             all_caps_dict.append(caps_dict)
 
@@ -1568,7 +1631,7 @@ class ExecWorker (object):
         slot_matrix += "|"
 
         self.logger.debug ("slot status:\n%s", slot_matrix)
-        return {'timestamp' : timestamp(), 
+        return {'timestamp' : timestamp(),
                 'slotstate' : slot_matrix}
 
 
@@ -1613,7 +1676,7 @@ class ExecWorker (object):
                     self.logger.info ('Node %s satisfies %d cores at offset %d' \
                                    % (slot_node, cores_requested, slot_cores_offset))
                     return ['%s:%d' % (slot_node, core) \
-                            for core in range(slot_cores_offset, 
+                            for core in range(slot_cores_offset,
                                               slot_cores_offset + cores_requested)]
 
             return None
@@ -1698,13 +1761,13 @@ class ExecWorker (object):
             if  continuous:
                 task_slots = find_slots_single_cont(cores_requested)
             else:
-                log_raise (self.logger, NotImplementedError, 
+                log_raise (self.logger, NotImplementedError,
                            'Scattered single node scheduler not implemented.')
         else:
             if  continuous:
                 task_slots = find_slots_multi_cont(cores_requested)
             else:
-                log_raise (self.logger, NotImplementedError, 
+                log_raise (self.logger, NotImplementedError,
                            'Scattered multi node scheduler not implemented.')
 
         if  task_slots is not None:
@@ -1815,7 +1878,7 @@ class ExecWorker (object):
 
         if  task.mpi :
             cmd = self.exec_env.mpi_launch_method.command  (self.exec_env.lrms, task.slots, task.cores)
-        else :                                                     
+        else :
             cmd = self.exec_env.task_launch_method.command (self.exec_env.lrms, task.slots, task.cores)
 
         script  = "%s\n"            %  cwd
@@ -1851,12 +1914,12 @@ class ExecWorker (object):
             req_cont = False
 
         # First try to find all cores on a single node
-        task.slots   = self.acquire_slots (task.cores, single_node=True, 
+        task.slots   = self.acquire_slots (task.cores, single_node=True,
                                             continuous=req_cont)
 
         # on failure, see if our launch method supports multiple nodes
         if  task.slots is None and launch_method in MULTI_NODE_LAUNCH_METHODS:
-            task.slots = self.acquire_slots (task.cores, single_node=False, 
+            task.slots = self.acquire_slots (task.cores, single_node=False,
                                               continuous=req_cont)
 
         # Check if we got results
@@ -1882,9 +1945,9 @@ class ExecWorker (object):
       # self.logger.debug (lines)
 
         if  len (lines) < 2 :
-            log_raise (self.logger, RuntimeError, 
+            log_raise (self.logger, RuntimeError,
                        "Failed to run task (%s)", lines)
-        
+
         if  lines[-2] != "OK" :
             self.logger.error ("Failed to run task (%s)" % lines)
             return FAIL
@@ -1895,7 +1958,7 @@ class ExecWorker (object):
 
       # self.logger.debug ("started task %s" % pid)
 
-        # before we return, we need to clean the 
+        # before we return, we need to clean the
         # 'BULK COMPLETED message from lrun
         ret, out = self.launcher_shell.find_prompt ()
         if  ret != 0 :
@@ -1920,7 +1983,7 @@ class ExecWorker (object):
         ret = self.launcher_shell.run_sync ("CANCEL %s" % task.pid)
 
         return OK
-    
+
 
 
 # ==============================================================================
@@ -1965,7 +2028,7 @@ class Agent (object):
         # first order of business: set the start time and state of the pilot
         self.logger.info ("agent started. Database updated.")
         self.p.update(
-            {"_id"  : ObjectId(self.pilot_id)}, 
+            {"_id"  : ObjectId(self.pilot_id)},
             {"$set" : {"state"          : ACTIVE,
                        "nodes"          : self.lrms.node_list,
                        "cores_per_node" : self.lrms.cores_per_node,
@@ -2017,16 +2080,17 @@ class Agent (object):
 
             except Exception as ex :
                 # If we arrive here, there was an exception in the main loop.
-                pilot_FAILED (self.p, self.pilot_id, self.logger, 
+                pilot_FAILED (self.p, self.pilot_id, self.logger,
                               "ERROR in agent main loop: %s. %s" \
                               % (str(ex), traceback.format_exc()))
 
 
     # --------------------------------------------------------------------------
+    #
     def check_state (self) :
 
-        # Make sure that we haven't exceeded the agent runtime. if 
-        # we have, terminate. 
+        # Make sure that we haven't exceeded the agent runtime. if
+        # we have, terminate.
         if  time.time() >= self.starttime + (int(self.runtime) * 60):
             self.logger.info ("agent has reached runtime limit of %s seconds." \
                            % str(int(self.runtime)*60))
@@ -2036,6 +2100,7 @@ class Agent (object):
 
 
     # --------------------------------------------------------------------------
+    #
     def check_commands (self) :
 
         # Check if there's a command waiting
@@ -2054,7 +2119,7 @@ class Agent (object):
             if command[COMMAND_TYPE] == COMMAND_CANCEL_PILOT:
                 self.logger.info ("Received Cancel Pilot command.")
                 self.exec_worker.stop ()
-                pilot_CANCELED (self.p, self.pilot_id, self.logger, 
+                pilot_CANCELED (self.p, self.pilot_id, self.logger,
                                 "CANCEL received. Terminating.")
 
             elif command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
@@ -2067,7 +2132,7 @@ class Agent (object):
                 self.logger.info ("Received KeepAlive command.")
 
             else:
-                log_raise (self.logger, Exception, 
+                log_raise (self.logger, Exception,
                            "Received unknown command: %s with arg: %s.", \
                            command[COMMAND_TYPE], command[COMMAND_ARG])
 
@@ -2075,6 +2140,7 @@ class Agent (object):
 
 
     # --------------------------------------------------------------------------
+    #
     def check_tasks (self) :
 
         # Try to get new tasks from the database. for this, we check the
@@ -2087,7 +2153,7 @@ class Agent (object):
             query  = {"pilot" : self.pilot_id,
                       "state" : "PendingExecution"},
             update = {"$set" : {"state"       : "Scheduling"},
-                      "$push": {"statehistory": {"state":     "Scheduling", 
+                      "$push": {"statehistory": {"state":     "Scheduling",
                                                  "timestamp": timestamp()}}}
         )
 
@@ -2127,7 +2193,7 @@ class Agent (object):
 # main
 #
 # ==============================================================================
-# 
+#
 def main () :
 
     # parse command line options
@@ -2146,7 +2212,6 @@ def main () :
     logger.info ("RADICAL-Pilot multi-core agent for package/API version %s" \
               % options.package_version)
 
-    #---------------------------------------------------------------------------
     # Establish database for signal handlers
     try:
         mongo_client = pymongo.MongoClient(options.mongodb_url)
@@ -2157,34 +2222,28 @@ def main () :
         logger.error ("Couldn't establish database connection: %s", str(ex))
         sys.exit (1)
 
-    #---------------------------------------------------------------------------
     # Some signal handling magic
     def sigint_handler (_signal, frame):
-        pilot_FAILED (mongo_p, options.pilot_id, logger, 
+        pilot_FAILED (mongo_p, options.pilot_id, logger,
                       'Caught SIGINT. EXITING.')
     signal.signal (signal.SIGINT, sigint_handler)
 
     def sigalarm_handler (_signal, frame):
-        pilot_FAILED (mongo_p, options.pilot_id, logger, 
+        pilot_FAILED (mongo_p, options.pilot_id, logger,
                       'Caught SIGALRM (Walltime limit reached?). EXITING')
     signal.signal(signal.SIGALRM, sigalarm_handler)
 
 
-    #---------------------------------------------------------------------------
     # Launch the agent
-    if True :
-  # try:
-        agent = Agent (options = options, 
+    try:
+        agent = Agent (options = options,
                        logger  = logger)
         agent.work ()
-
-  # except Exception as e :
-  #     pilot_FAILED (mongo_p, options.pilot_id, logger, 
-  #                   "Error running agent: %s" % e)
-
-  # except SystemExit:
-  #     pilot_FAILED (mongo_p, options.pilot_id, logger, 
-  #                   "Caught keyboard interrupt. EXITING")
+   
+    except Exception as e :
+        pilot_FAILED (mongo_p, options.pilot_id, logger,
+                      "Error running agent: %s" % e)
+   
 
 # ==============================================================================
 #
@@ -2194,5 +2253,4 @@ if __name__ == "__main__":
 
 
 # ==============================================================================
-#
 

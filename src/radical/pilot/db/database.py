@@ -29,6 +29,8 @@ COMMAND_TYPE                = "type"
 COMMAND_ARG                 = "arg"
 COMMAND_TIME                = "time"
 
+BATCHSIZE = 1000
+
 # -----------------------------------------------------------------------------
 #
 class DBException(Exception):
@@ -161,12 +163,14 @@ class Session():
 
         self._s = self._db["%s" % sid]
         cursor = self._s.find({"_id": ObjectId(sid)})
+        cursor.batch_size(BATCHSIZE)
 
         self._s.update({"_id"  : ObjectId(sid)},
                        {"$set" : {"last_reconnect" : datetime.datetime.utcnow()}}
         )
 
         cursor = self._s.find({"_id": ObjectId(sid)})
+        cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         #if len(cursor) != 1:
@@ -266,6 +270,7 @@ class Session():
 
         pilot_manager_uids = []
         cursor = self._pm.find()
+        cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         for obj in cursor:
@@ -284,6 +289,7 @@ class Session():
             {"_id": ObjectId(unit_uid)},
             {"stdout_id": 1}
         )
+        cursor.batch_size(BATCHSIZE)
 
         stdout_id = cursor[0]['stdout_id']
 
@@ -306,6 +312,7 @@ class Session():
             {"_id": ObjectId(unit_uid)},
             {"stderr_id": 1}
         )
+        cursor.batch_size(BATCHSIZE)
 
         stderr_id = cursor[0]['stderr_id']
 
@@ -411,8 +418,10 @@ class Session():
 
         if pilot_manager_uid is not None:
             cursor = self._p.find({"pilotmanager": pilot_manager_uid})
+            cursor.batch_size(BATCHSIZE)
         else:
             cursor = self._p.find()
+            cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         for obj in cursor:
@@ -433,6 +442,7 @@ class Session():
 
         if pilot_ids is None:
             cursor = self._p.find({"pilotmanager": pilot_manager_id})
+            cursor.batch_size(BATCHSIZE)
         else:
 
             if not isinstance(pilot_ids, list):
@@ -443,6 +453,7 @@ class Session():
             for pid in pilot_ids:
                 pilot_oid.append(ObjectId(pid))
             cursor = self._p.find({"_id": {"$in": pilot_oid}})
+            cursor.batch_size(BATCHSIZE)
 
         pilots_json = []
         for obj in cursor:
@@ -509,8 +520,10 @@ class Session():
 
         if unit_ids is None:
             cursor = self._w.find(
-                {"unitmanager": unit_manager_id}
+                {"unitmanager": unit_manager_id},
+                exhaust=True
             )
+            cursor.batch_size(BATCHSIZE)
 
         else:
             # convert ids to object ids
@@ -520,8 +533,10 @@ class Session():
 
             cursor = self._w.find(
                 {"_id": {"$in": unit_oid},
-                 "unitmanager": unit_manager_id}
+                 "unitmanager": unit_manager_id},
+                exhaust=True
             )
+            cursor.batch_size(BATCHSIZE)
 
         units_json = []
         for obj in cursor:
@@ -574,6 +589,7 @@ class Session():
                 {"unitmanager": unit_manager_id},
                 {"state": 1}
             )
+            cursor.batch_size(BATCHSIZE)
 
         else:
             # convert ids to object ids
@@ -586,6 +602,7 @@ class Session():
                  "unitmanager": unit_manager_id},
                 {"state": 1}
             )
+            cursor.batch_size(BATCHSIZE)
 
         unit_states = []
         for obj in cursor:
@@ -621,6 +638,7 @@ class Session():
             raise DBException("No active session.")
 
         cursor = self._um.find({"_id": ObjectId(unit_manager_id)})
+        cursor.batch_size(BATCHSIZE)
 
         if cursor.count() != 1:
             msg = "No unit manager with id %s found in DB." % unit_manager_id
@@ -641,6 +659,7 @@ class Session():
             raise DBException("No active session.")
 
         cursor = self._pm.find({"_id": ObjectId(pilot_manager_id)})
+        cursor.batch_size(BATCHSIZE)
 
         try:
             return cursor[0]
@@ -659,6 +678,7 @@ class Session():
 
         unit_manager_uids = []
         cursor = self._um.find()
+        cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         for obj in cursor:
@@ -700,6 +720,7 @@ class Session():
             raise Exception("No active session.")
 
         cursor = self._p.find({"unitmanager": unit_manager_uid})
+        cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         pilot_ids = []
@@ -716,6 +737,7 @@ class Session():
             raise Exception("No active session.")
 
         cursor = self._w.find({"unitmanager": unit_manager_uid})
+        cursor.batch_size(BATCHSIZE)
 
         # cursor -> dict
         unit_ids = []

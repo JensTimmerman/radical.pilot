@@ -285,7 +285,7 @@ class PilotManagerController(threading.Thread):
                 if not self._initialized.is_set():
                     self._initialized.set()
 
-            time.sleep(1)
+            time.sleep(0.1)
 
         # shut down the autonomous pilot launcher worker(s)
         for worker in self._pilot_launcher_worker_pool:
