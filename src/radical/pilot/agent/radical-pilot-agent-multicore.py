@@ -627,7 +627,7 @@ class ExecutionEnvironment(object):
         self.log.info("Using fork on localhost.")
 
         detected_cpus = multiprocessing.cpu_count()
-        selected_cpus = min(detected_cpus, self.requested_cores)
+        selected_cpus = max(detected_cpus, self.requested_cores)
 
         self.log.info("Detected %d cores on localhost, using %d." % (detected_cpus, selected_cpus))
 
