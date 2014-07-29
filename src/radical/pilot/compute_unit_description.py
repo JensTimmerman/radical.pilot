@@ -21,6 +21,7 @@ ARGUMENTS              = 'arguments'
 ENVIRONMENT            = 'environment'
 CORES                  = 'cores'
 MPI                    = 'mpi'
+KEEP_STDIO             = 'keep_stdio'
 INPUT_DATA             = 'input_data'
 OUTPUT_DATA            = 'output_data'
 PRE_EXEC               = 'pre_exec'
@@ -64,6 +65,10 @@ class ComputeUnitDescription(attributes.Attributes) :
 
        (`Attribute`) Environment variables to set in the execution environment (`dict`) [`optional`].
 
+    .. data:: keep_stdio
+
+       (`Attribute`) Set to true if the unit's stdout/stderr need to be available after finishing (`bool`) [`optional`].
+
     .. data:: input_data 
 
        (`Attribute`) The input files that need to be transferred before execution (`transfer directive string`) [`optional`].
@@ -100,31 +105,32 @@ class ComputeUnitDescription(attributes.Attributes) :
 
         # register properties with the attribute interface
         # action description
-        self._attributes_register(NAME,                   None, attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
-        self._attributes_register(EXECUTABLE,             None, attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
-        self._attributes_register(ARGUMENTS,              None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        self._attributes_register(ENVIRONMENT,            None, attributes.STRING, attributes.DICT,   attributes.WRITEABLE)
-        self._attributes_register(PRE_EXEC,               None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        self._attributes_register(POST_EXEC,              None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        #self._attributes_register(CLEANUP,           None, attributes.BOOL,   attributes.SCALAR, attributes.WRITEABLE)
-        #self._attributes_register(START_TIME,        None, attributes.TIME,   attributes.SCALAR, attributes.WRITEABLE)
-        #self._attributes_register(RUN_TIME,          None, attributes.TIME,   attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(NAME,                   None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(EXECUTABLE,             None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(ARGUMENTS,              None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+        self._attributes_register(ENVIRONMENT,            None,  attributes.STRING, attributes.DICT,   attributes.WRITEABLE)
+        self._attributes_register(PRE_EXEC,               None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+        self._attributes_register(POST_EXEC,              None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+      # self._attributes_register(CLEANUP,                None,  attributes.BOOL,   attributes.SCALAR, attributes.WRITEABLE)
+      # self._attributes_register(START_TIME,             None,  attributes.TIME,   attributes.SCALAR, attributes.WRITEABLE)
+      # self._attributes_register(RUN_TIME,               None,  attributes.TIME,   attributes.SCALAR, attributes.WRITEABLE)
 
         # I/O
-        self._attributes_register(INPUT_DATA,             None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        self._attributes_register(OUTPUT_DATA,            None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+        self._attributes_register(KEEP_STDIO,             False, attributes.BOOL,   attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(INPUT_DATA,             None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+        self._attributes_register(OUTPUT_DATA,            None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
 
         # resource requirements
-        self._attributes_register(CORES,                  1, attributes.INT,    attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(CORES,                  1,     attributes.INT,    attributes.SCALAR, attributes.WRITEABLE)
         self._attributes_register(MPI,                    False, attributes.BOOL,   attributes.SCALAR, attributes.WRITEABLE)
-        #self._attributes_register(CPU_ARCHITECTURE,  None, attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
-        #self._attributes_register(OPERATING_SYSTEM,  None, attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
-        #self._attributes_register(MEMORY,            None, attributes.INT,    attributes.SCALAR, attributes.WRITEABLE)
-
-        # dependencies
-        #self._attributes_register(RUN_AFTER,         None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        #self._attributes_register(START_AFTER,       None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        #self._attributes_register(CONCURRENT_WITH,   None, attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+      # self._attributes_register(CPU_ARCHITECTURE,       None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
+      # self._attributes_register(OPERATING_SYSTEM,       None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
+      # self._attributes_register(MEMORY,                 None,  attributes.INT,    attributes.SCALAR, attributes.WRITEABLE)
+                                                                 
+      #  dependencies                                            
+      # self._attributes_register(RUN_AFTER,              None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+      # self._attributes_register(START_AFTER,            None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+      # self._attributes_register(CONCURRENT_WITH,        None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
 
 
     #------------------------------------------------------------------------------
@@ -141,6 +147,7 @@ class ComputeUnitDescription(attributes.Attributes) :
             ENVIRONMENT            : self.environment,
             CORES                  : self.cores,
             MPI                    : self.mpi,
+            KEEP_STDIO             : self.keep_stdio, 
             INPUT_DATA             : self.input_data, 
             OUTPUT_DATA            : self.output_data,
             PRE_EXEC               : self.pre_exec,

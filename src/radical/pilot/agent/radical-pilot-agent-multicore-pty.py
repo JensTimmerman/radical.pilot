@@ -1174,18 +1174,19 @@ class Task (object):
         # static task properties
         self.uid            = uid
 
-        self.executable     = self.description.get ("executable",  None)
-        self.arguments      = self.description.get ("arguments",   None)
-        self.environment    = self.description.get ("environment", None)
-        self.cores          = self.description.get ("cores",       None)
-        self.mpi            = self.description.get ("mpi",         None)
-        self.pre_exec       = self.description.get ("pre_exec",    None)
-        self.post_exec      = self.description.get ("post_exec",   None)
-        self.workdir        = self.description.get ("sandbox",     None)
-        self.stdin          = self.description.get ("stdin",       None)
-        self.stdout         = self.description.get ("stdout",      None)
-        self.stderr         = self.description.get ("stderr",      None)
-        self.output_data    = self.description.get ("output_data", None)
+        self.executable     = self.description.get ("executable",  None )
+        self.arguments      = self.description.get ("arguments",   None )
+        self.environment    = self.description.get ("environment", None )
+        self.cores          = self.description.get ("cores",       None )
+        self.mpi            = self.description.get ("mpi",         None )
+        self.pre_exec       = self.description.get ("pre_exec",    None )
+        self.post_exec      = self.description.get ("post_exec",   None )
+        self.workdir        = self.description.get ("sandbox",     None )
+        self.stdin          = self.description.get ("stdin",       None )
+        self.stdout         = self.description.get ("stdout",      None )
+        self.stderr         = self.description.get ("stderr",      None )
+        self.keep_stdio     = self.description.get ("keep_stdio" , False)
+        self.output_data    = self.description.get ("output_data", None )
 
 
 
@@ -1379,10 +1380,12 @@ class ExecWorker (object):
     #
     def monitor (self) :
 
-        MONITOR_TIMEOUT  = 1.0    # check for stop signal now and then
-        unhandled_events = dict() # keep track of events which arrived
-                                  # before the job was known...
-        known_tasks      = list() # tasks we have seen before at some point
+        MONITOR_TIMEOUT  = 1.0          # check for stop signal now and then
+        REVISIT_TIMEOUT  = 5.0          # revisit old events after that time
+        unhandled_events = dict()       # keep track of events which arrived
+                                        # before the job was known...
+        known_tasks      = list()       # tasks we have seen before at some point
+        revisited_time   = time.time () # last time old events were handled
 
         ret, out, _ = self.monitor_shell.run_sync \
                           (" /bin/sh %s/radical-pilot-agent-ptywrapper.sh $$ %s" \
@@ -1432,31 +1435,72 @@ class ExecWorker (object):
                     task.state = PENDING_OUTPUT_TRANSFER
 
                 # upload stdout and stderr via GridFS
-                workdir   = task.workdir
-                stdout_id = None
-                stderr_id = None
+                if  not task.keep_stdio :
+                    task.stdout_id = None
+                    task.stderr_id = None
 
-                # FIXME: use actual stdout/stdin from task if set
-                stdout = "%s/STDOUT" % workdir
-                stderr = "%s/STDERR" % workdir
+                else :
 
-                if  op.isfile (stdout) :
-                    fs = gridfs.GridFS (self.mongo_db)
-                    with open (stdout, 'r') as f :
-                        stdout_id = fs.put (f.read(), filename=stdout)
-                        self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                       % (stdout, str(stdout_id)))
+                    workdir   = task.workdir
 
-                if op.isfile (stderr) :
-                    fs = gridfs.GridFS (self.mongo_db)
-                    with open (stderr, 'r') as f :
-                        stderr_id = fs.put (f.read(), filename=stderr)
-                        self.logger.info ("Uploaded %s to MongoDB as %s." \
-                                       % (stderr, str(stderr_id)))
+                    # FIXME: use actual stdout/stdin from task if set
+                    stdout = "%s/STDOUT" % workdir
+                    stderr = "%s/STDERR" % workdir
 
-                task.stdout_id = stdout_id
-                task.stderr_id = stderr_id
+                    if  op.isfile (stdout) :
+                        fs = gridfs.GridFS (self.mongo_db)
+                        with open (stdout, 'r') as f :
+                            task.stdout_id = fs.put (f.read(), filename=stdout)
+                            self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                           % (stdout, str(task.stdout_id)))
+
+                    if op.isfile (stderr) :
+                        fs = gridfs.GridFS (self.mongo_db)
+                        with open (stderr, 'r') as f :
+                            task.stderr_id = fs.put (f.read(), filename=stderr)
+                            self.logger.info ("Uploaded %s to MongoDB as %s." \
+                                           % (stderr, str(task.stderr_id)))
+
         # ----------------------------------------------------------------------
+        #
+        def handle_old_events () :
+
+            if  unhandled_events.keys () :
+
+                # sorry for the python array semi-shallow copy magic...
+                for pid in unhandled_events.keys()[:] :
+
+                    self.logger.debug ('recheck events for %s' % pid)
+                    if  pid not in self.running_tasks :
+
+                        if  pid in known_tasks :
+                            # we saw this task before though -- it will not come
+                            # back...  discard/ignore event
+                            self.logger.debug ('discard as old event')
+                            del unhandled_events[pid]
+
+                        else :
+                            # task not known -- still can't do nothing
+                            self.logger.debug ('%s is not known' % pid)
+
+                    else :
+
+                        # task is now known!  Handle events...
+
+                        task = self.running_tasks[pid]
+
+                        for [state, rc, ts] in unhandled_events[pid] :
+
+                            self.logger.debug  ('%s is handled' % pid)
+                            handle_event (task, state, rc, ts)
+
+                        self.updater_queue.put (task)
+                        del unhandled_events[pid]
+
+                revisited_time = time.time ()
+
+        # ----------------------------------------------------------------------
+        
 
 
         while True :
@@ -1474,37 +1518,7 @@ class ExecWorker (object):
                     return
 
                 # its also a chance to feed a previous event
-                if  unhandled_events.keys () :
-
-                    # sorry for the python array semi-shallow copy magic...
-                    for pid in unhandled_events.keys()[:] :
-
-                        self.logger.debug ('recheck events for %s' % pid)
-                        if  pid not in self.running_tasks :
-
-                            if  pid in known_tasks :
-                                # we saw this task before though -- it will not come
-                                # back...  discard/ignore event
-                                self.logger.debug ('discard as old event')
-                                del unhandled_events[pid]
-
-                            else :
-                                # task not known -- still can't do nothing
-                                self.logger.debug ('%s is not known' % pid)
-
-                        else :
-
-                            # task is now known!  Handle events...
-
-                            task = self.running_tasks[pid]
-
-                            for [state, rc, ts] in unhandled_events[pid] :
-
-                                self.logger.debug  ('%s is handled' % pid)
-                                handle_event (task, state, rc, ts)
-
-                            self.updater_queue.put (task)
-                            del unhandled_events[pid]
+                handle_old_events ()
 
                 # no termination, unhandled events handled -- read pipe again
                 continue
@@ -1567,6 +1581,12 @@ class ExecWorker (object):
                         self.updater_queue.put (task)
 
 
+            # make sure that remaining old events are not getting stale...
+            now = time.time()
+            if  now - revisited_time > REVISIT_TIMEOUT :
+                handle_old_events ()
+
+
     # --------------------------------------------------------------------------
     #
     def updater (self) :
@@ -1574,6 +1594,8 @@ class ExecWorker (object):
         """
         Updates database entries for tasks coming through the updater queue.
         """
+
+        MAX_BULK_SIZE = 10    # always push after that many events
 
         bulk_w = self.w.initialize_ordered_bulk_op ()
       # bulk_p = self.p.initialize_ordered_bulk_op ()
@@ -1612,9 +1634,9 @@ class ExecWorker (object):
 
                 # make sure we push now and then, even if there are new events
                 # pending...
-                if  cnt_w > 100 :
+                if  cnt_w > MAX_BULK_SIZE :
                     push_bulks = True
-              # if  cnt_p > 10 :
+              # if  cnt_p > MAX_BULK_SIZE :
               #     push_bulks = True
 
             except Queue.Empty :
