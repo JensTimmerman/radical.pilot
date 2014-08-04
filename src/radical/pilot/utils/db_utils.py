@@ -6,7 +6,8 @@ import pymongo
 #
 def get_session_ids (dbclient, dbname) :
 
-    if not dbname : usage ("require specific database name to list session IDs")
+    if not dbname : 
+        raise RuntimeError ("require specific database name to list session IDs")
 
     database = dbclient[dbname]
     cnames = database.collection_names ()

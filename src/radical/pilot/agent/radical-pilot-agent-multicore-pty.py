@@ -1595,7 +1595,7 @@ class ExecWorker (object):
         Updates database entries for tasks coming through the updater queue.
         """
 
-        MAX_BULK_SIZE = 10    # always push after that many events
+        MAX_BULK_SIZE = 100    # always push after that many events
 
         bulk_w = self.w.initialize_ordered_bulk_op ()
       # bulk_p = self.p.initialize_ordered_bulk_op ()
