@@ -143,9 +143,6 @@ class LateBindingScheduler(Scheduler):
 
         pid = pilot.uid
 
-        if  pid in self.pilots :
-            raise RuntimeError ('cannot add pilot twice (%s)' % pid)
-
         # get initial information about the pilot capabilities
         #
         # NOTE: this assumes that the pilot manages no units, yet.  This will
@@ -155,8 +152,10 @@ class LateBindingScheduler(Scheduler):
         # code as well, thus we silently ignore this issue for now, and accept
         # this as known limitation....
         self.pilots[pid] = dict()
-        self.pilots[pid]['caps']  = pilot.description.cores
-        self.pilots[pid]['state'] = pilot.state
+        self.pilots[pid]['caps']     = pilot.description.cores
+        self.pilots[pid]['state']    = pilot.state
+        self.pilots[pid]['resource'] = pilot.resource
+        self.pilots[pid]['sandbox']  = pilot.sandbox
 
         # make sure we register callback only once per pmgr
         pmgr = pilot.pilot_manager
@@ -238,9 +237,9 @@ class LateBindingScheduler(Scheduler):
         # if any units get scheduled, we push a dictionary to the UM to enact
         # the schedule:
         #   { 
-        #     unit_1: pilot_id_1
-        #     unit_2: pilot_id_2
-        #     unit_4: pilot_id_2
+        #     unit_1: [pilot_id_1, pilot_resource_name]
+        #     unit_2: [pilot_id_2, pilot_resource_name]
+        #     unit_4: [pilot_id_2, pilot_resource_name]
         #     ...
         #   }
 
@@ -254,7 +253,9 @@ class LateBindingScheduler(Scheduler):
 
         print "Late-binding re-scheduling of %s units" % len(self.waitq)
 
-        schedule = dict()
+        schedule           = dict()
+        schedule['units']  = dict()
+        schedule['pilots'] = self.pilots
 
         # iterate on copy of waitq, as we manipulate the list during iteration.
         for unit in self.waitq[:] :
@@ -274,14 +275,17 @@ class LateBindingScheduler(Scheduler):
                             raise RuntimeError ("scheduler queue should only contain NEW units (%s)" % uid)
 
                         self.pilots[pid]['caps'] -= ud.cores
-                        schedule[unit] = pid
+                        schedule['units'][unit] = pid
 
                         # scheduled units are removed from the waitq
                         self.waitq.remove (unit)
                         break
 
                 # unit was not scheduled...
-                schedule[unit] = None
+                schedule['units'][unit] = None
+
+
+
                      
         print "SCHEDULE"
         pprint.pprint (schedule)

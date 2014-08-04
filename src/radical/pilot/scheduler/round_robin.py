@@ -31,14 +31,37 @@ class RoundRobinScheduler(Scheduler):
 
         self.manager = manager
         self.session = session
-        self._idx    = 0
+        self.pilots  = dict()
+        self.idx     = 0
 
         logger.info("Loaded scheduler: %s." % self.name)
 
 
     # -------------------------------------------------------------------------
     #
+    def pilot_added (self, pilot) :
+
+        pid = pilot.uid
+
+        self.pilots[pid] = dict()
+        self.pilots[pid]['resource'] = pilot.resource
+        self.pilots[pid]['sandbox']  = pilot.sandbox
+
+
+    # -------------------------------------------------------------------------
+    #
+    def pilot_removed (self, pid) :
+
+        if  not pid in self.pilots :
+            raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
+
+        del self.pilots[pid]
+
+
+    # -------------------------------------------------------------------------
+    #
     def schedule(self, units):
+
         # the scheduler will return a dictionary of the form:
         #   { 
         #     unit_1: pilot_id_1
@@ -50,22 +73,26 @@ class RoundRobinScheduler(Scheduler):
         # simply not be listed for any pilot.  The UM needs to make sure
         # that no UD from the original list is left untreated, eventually.
 
-        #print "round-robin scheduling of %s units" % len(unit_descriptions)
+        pilot_ids          = self.pilots.keys ()
+        schedule           = dict()
+        schedule['units']  = dict()
+        schedule['pilots'] = self.pilots
 
-        pilot_ids = self.manager.list_pilots ()
-        schedule  = dict()
-
-        if not len (pilot_ids) :
+        if  not len (pilot_ids) :
             raise RuntimeError ('Unit scheduler cannot operate on empty pilot set')
 
 
         for unit in units :
             
-            if  self._idx >= len(pilot_ids) : 
-                self._idx = 0
+            if  self.idx >= len(pilot_ids) : 
+                self.idx = 0
             
-            schedule[unit] = pilot_ids[self._idx]
-            self._idx     += 1
+            schedule['units'][unit] = pilot_ids[self.idx]
+            self.idx               += 1
+
 
         return schedule
+
+
+    # -------------------------------------------------------------------------
 

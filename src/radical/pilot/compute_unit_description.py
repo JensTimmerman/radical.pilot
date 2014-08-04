@@ -1,4 +1,4 @@
-#pylint: disable=C0301, C0103, W0212, E1101, R0903
+# pylint: disable=C0301, C0103, W0212, E1101, R0903
 
 """
 .. module:: radical.pilot.compute_unit_description
@@ -20,12 +20,13 @@ EXECUTABLE             = 'executable'
 ARGUMENTS              = 'arguments'
 ENVIRONMENT            = 'environment'
 CORES                  = 'cores'
+INPUT_STAGING          = 'input_staging'
+OUTPUT_STAGING         = 'output_staging'
 MPI                    = 'mpi'
 KEEP_STDIO             = 'keep_stdio'
-INPUT_DATA             = 'input_data'
-OUTPUT_DATA            = 'output_data'
 PRE_EXEC               = 'pre_exec'
 POST_EXEC              = 'post_exec'
+KERNEL                 = 'kernel'
 
 # ------------------------------------------------------------------------------
 #
@@ -69,17 +70,17 @@ class ComputeUnitDescription(attributes.Attributes) :
 
        (`Attribute`) Set to true if the unit's stdout/stderr need to be available after finishing (`bool`) [`optional`].
 
-    .. data:: input_data 
+    .. data:: input_staging
 
-       (`Attribute`) The input files that need to be transferred before execution (`transfer directive string`) [`optional`].
+       (`Attribute`) The files that need to be staged before execution (`list` of `staging directives`) [`optional`].
 
-       .. note:: TODO: Explain transfer directives.
+       .. note:: TODO: Explain input staging.
 
-    .. data:: output_data 
+    .. data:: output_staging
 
-       (`Attribute`) The output files that need to be transferred back after execution (`transfer directive string`) [`optional`].
+       (`Attribute`) The files that need to be staged after execution (`list` of `staging directives`) [`optional`].
 
-       .. note:: TODO: Explain transfer directives.
+       .. note:: TODO: Explain output staging.
 
     .. data:: pre_exec
 
@@ -90,6 +91,13 @@ class ComputeUnitDescription(attributes.Attributes) :
        (`Attribute`) Actions to perform after this task finishes (`list` of `strings`) [`optional`].
 
        .. note:: Before the BigBang, there was nothing ...
+
+    .. data:: kernel
+
+       (`Attribute`) Name of a simulation kernel which expands to description
+       attributes once the unit is scheduled to a pilot (and resource).
+
+       .. note:: TODO: explain in detal, reference ENMDTK.
 
     """
     def __init__(self):
@@ -105,6 +113,7 @@ class ComputeUnitDescription(attributes.Attributes) :
 
         # register properties with the attribute interface
         # action description
+        self._attributes_register(KERNEL,                 None, attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
         self._attributes_register(NAME,                   None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
         self._attributes_register(EXECUTABLE,             None,  attributes.STRING, attributes.SCALAR, attributes.WRITEABLE)
         self._attributes_register(ARGUMENTS,              None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
@@ -117,8 +126,8 @@ class ComputeUnitDescription(attributes.Attributes) :
 
         # I/O
         self._attributes_register(KEEP_STDIO,             False, attributes.BOOL,   attributes.SCALAR, attributes.WRITEABLE)
-        self._attributes_register(INPUT_DATA,             None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
-        self._attributes_register(OUTPUT_DATA,            None,  attributes.STRING, attributes.VECTOR, attributes.WRITEABLE)
+        self._attributes_register(INPUT_STAGING,          None, attributes.ANY, attributes.SCALAR, attributes.WRITEABLE)
+        self._attributes_register(OUTPUT_STAGING,         None, attributes.ANY, attributes.SCALAR, attributes.WRITEABLE)
 
         # resource requirements
         self._attributes_register(CORES,                  1,     attributes.INT,    attributes.SCALAR, attributes.WRITEABLE)
@@ -141,6 +150,7 @@ class ComputeUnitDescription(attributes.Attributes) :
         # Apparently the attribute interface only handles 'non-None' attributes,
         # so we do it manually. More explicit anyways.
         obj_dict = {
+            KERNEL                 : self.kernel,
             NAME                   : self.name,
             EXECUTABLE             : self.executable,
             ARGUMENTS              : self.arguments,
@@ -148,12 +158,25 @@ class ComputeUnitDescription(attributes.Attributes) :
             CORES                  : self.cores,
             MPI                    : self.mpi,
             KEEP_STDIO             : self.keep_stdio, 
-            INPUT_DATA             : self.input_data, 
-            OUTPUT_DATA            : self.output_data,
             PRE_EXEC               : self.pre_exec,
             POST_EXEC              : self.post_exec
         }
+        if not self.input_staging:
+            obj_dict[INPUT_STAGING] = []
+        elif not isinstance(self.input_staging, list):
+            obj_dict[INPUT_STAGING] = [self.input_staging.as_dict()]
+        else:
+            obj_dict[INPUT_STAGING] = [x.as_dict() for x in self.input_staging]
+
+        if not self.output_staging:
+            obj_dict[OUTPUT_STAGING] = []
+        elif not isinstance(self.output_staging, list):
+            obj_dict[OUTPUT_STAGING] = [self.output_staging.as_dict()]
+        else:
+            obj_dict[OUTPUT_STAGING] = [x.as_dict() for x in self.output_staging]
+
         return obj_dict
+
 
     #------------------------------------------------------------------------------
     #
@@ -161,3 +184,4 @@ class ComputeUnitDescription(attributes.Attributes) :
         """Returns a string representation of the object.
         """
         return str(self.as_dict())
+
