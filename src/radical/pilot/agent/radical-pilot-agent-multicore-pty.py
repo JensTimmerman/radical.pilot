@@ -41,7 +41,7 @@ from   bson.objectid import ObjectId
 # ==============================================================================
 #
 # - purge CU on ptywrapper level after reaching final state
-# - RP: canceling many jobs onb shutdown is not done in bulk (and it shows)
+# - RP: canceling many jobs on shutdown is not done in bulk (and it shows)
 # - there is race condition between task startup and registering the created
 #   task in running_tasks -- the monitoring thread can pick up the RUNNING event
 #   meanwhile:
