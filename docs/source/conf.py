@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# SAGA documentation build configuration file, created by
+# RADICAL-Pilot documentation build configuration file, created by
 # sphinx-quickstart on Mon Dec  3 21:55:42 2012.
 #
 # This file is execfile()d with the current directory set to its containing dir.
@@ -15,7 +15,7 @@ import glob
 import imp
 import sys
 import os
-import json
+import radical.utils as ru
 import pprint
 import subprocess as sp
 
@@ -38,8 +38,8 @@ tags.add (mytag)
 
 ################################################################################
 ##
+print "* Generating resource configuration docs: resources.rst"
 print "* using tag: %s" % mytag
-print "* Generating code example list: examples.rst"
 
 try:
     os.remove("{0}/resources.rst".format(script_dir))
@@ -48,52 +48,71 @@ except OSError:
 
 with open("{0}/resources.rst".format(script_dir), "w") as resources_rst:
 
-    examples = os.listdir("{0}/../../src/radical/pilot/configs/".format(script_dir))
-    for example in examples:
+    resources_rst.write("""
 
-        if example.endswith(".json") is False:
+.. _chapter_resources:
+
+List of Pre-Configured Resources
+================================
+
+""")
+
+    configs = os.listdir("{0}/../../src/radical/pilot/configs/".format(script_dir))
+    for config in configs:
+
+        if config.endswith(".json") is False:
             continue # skip all non-python files
 
-        print " * %s" % example
+        if config.startswith("aliases") is True:
+            continue # skip alias files
 
-        with open("../../src/radical/pilot/configs/{0}".format(example)) as cfg_file:
-            try: 
-                json_data = json.load(cfg_file)
+        print " * %s" % config
+
+        try: 
+             json_data = ru.read_json_str("../../src/radical/pilot/configs/%s" % config)
+        except Exception, ex:
+             print "    * JSON PARSING ERROR: %s" % str(ex)
+             continue
+
+
+        for resource_key, resource_config in json_data.iteritems():
+            print "   * %s" % resource_key
+            try:
+                default_queue = resource_config["default_queue"]
             except Exception, ex:
-                print "    * JSON PARSING ERROR: %s" % str(ex)
-                continue
+                default_queue = None
 
+            try:
+                working_dir = resource_config["default_remote_workdir"]
+            except Exception, ex:
+                working_dir = "$HOME"
 
-            for resource_key, resource_config in json_data.iteritems():
-                print "   * %s" % resource_key
-                try:
-                    default_queue = resource_config["default_queue"]
-                except Exception, ex:
-                    default_queue = None
-                try:
-                    working_dir = resource_config["default_remote_workdir"]
-                except Exception, ex:
-                    working_dir = "$HOME/radical.pilot.sandbox"
-                try:
-                    python_interpreter = resource_config["python_interpreter"]
-                except Exception, ex:
-                    python_interpreter = None
+            try:
+                python_interpreter = resource_config["python_interpreter"]
+            except Exception, ex:
+                python_interpreter = None
 
-                resources_rst.write("{0}\n".format(resource_key))
-                resources_rst.write("{0}\n\n".format("-"*len(resource_key)))
-                resources_rst.write("{0}\n\n".format(resource_config["description"]))
-                if resource_config["notes"] != "None":
-                    resources_rst.write(".. note::  {0}\n\n".format(resource_config["notes"]))
-                resources_rst.write("Default values for ComputePilotDescription attributes:\n\n")
-                resources_rst.write("================== ============================\n")
-                resources_rst.write("Parameter               Value\n")
-                resources_rst.write("================== ============================\n")
-                resources_rst.write("``queue``               {0}\n".format(default_queue))
-                resources_rst.write("``sandbox``             {0}\n".format(working_dir))
-                resources_rst.write("================== ============================\n\n")
+            try:
+                access_schemas = resource_config["schemas"]
+            except Exception, ex:
+                access_schemas = ['n/a']
 
+            resources_rst.write("{0}\n".format(resource_key))
+            resources_rst.write("{0}\n\n".format("-"*len(resource_key)))
+            resources_rst.write("{0}\n\n".format(resource_config["description"]))
+            if resource_config["notes"] != "None":
+                resources_rst.write(".. note::  {0}\n\n".format(resource_config["notes"]))
+            resources_rst.write("Default values for ComputePilotDescription attributes:\n\n")
+            resources_rst.write("================== ============================\n")
+            resources_rst.write("Parameter               Value\n")
+            resources_rst.write("================== ============================\n")
+            resources_rst.write("``queue``               {0}\n".format(default_queue))
+            resources_rst.write("``sandbox``             {0}\n".format(working_dir))
+            resources_rst.write("``access_schema``       {0}\n".format(access_schemas[0]))
+            resources_rst.write("================== ============================\n\n")
+            resources_rst.write("Available schemas: ``{0}``\n\n".format(', '.join(access_schemas)))
 
-                resources_rst.write(":download:`Raw Configuration file: {0} <../../src/radical/pilot/configs/{0}>`\n\n".format(example))
+            resources_rst.write(":download:`Raw Configuration file: {0} <../../src/radical/pilot/configs/{0}>`\n\n".format(config))
 ##
 ################################################################################
 
