@@ -81,7 +81,7 @@ MongoDB server you want to use, for example:
 
     .. code-block:: bash
             
-            export RADICAL_PILOT_DBURL=mongodb://23.23.136.91:27017/
+            export RADICAL_PILOT_DBURL=mongodb://54.83.11.62:27017/
 
 .. only:: release
 
