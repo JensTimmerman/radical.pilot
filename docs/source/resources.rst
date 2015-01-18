@@ -83,25 +83,6 @@ Available schemas: ``ssh``
 
 :download:`Raw Configuration file: futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
 
-radical.tutorial
-----------------
-
-Our private tutorial VM on EC2
-
-Default values for ComputePilotDescription attributes:
-
-================== ============================
-Parameter               Value
-================== ============================
-``queue``               batch
-``sandbox``             $HOME
-``access_schema``       ssh
-================== ============================
-
-Available schemas: ``ssh, local``
-
-:download:`Raw Configuration file: radical.json <../../src/radical/pilot/configs/radical.json>`
-
 rice.davinci
 ------------
 
