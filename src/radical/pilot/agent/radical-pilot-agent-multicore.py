@@ -3237,7 +3237,7 @@ class ExecWorker_POPEN (ExecWorker) :
                         launcher = self._task_launcher
 
                     if not launcher:
-                        self._agent.update_unit_state(
+                        self._agent.update_unit(
                                 uid    = cu['_id'],
                                 state  = rp.FAILED,
                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
@@ -3267,10 +3267,10 @@ class ExecWorker_POPEN (ExecWorker) :
                     if cu['opaque_slot']:
                         self._scheduler.unschedule(cu)
 
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.FAILED,
-                                                  msg    = "unit execution failed",
-                                                  logger = self._log.exception)
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.FAILED,
+                                            msg    = "unit execution failed",
+                                            logger = self._log.exception)
 
 
         except Exception as e:
@@ -3385,9 +3385,9 @@ class ExecWorker_POPEN (ExecWorker) :
         cu['proc']    = proc
 
         # register for state update and watching
-        self._agent.update_unit_state(uid    = cu['_id'],
-                                      state  = rp.EXECUTING,
-                                      msg    = "unit execution start")
+        self._agent.update_unit(uid    = cu['_id'],
+                                state  = rp.EXECUTING,
+                                msg    = "unit execution start")
 
         cu_list = blowup (cu, WATCH) 
         for _cu in cu_list :
@@ -3486,10 +3486,10 @@ class ExecWorker_POPEN (ExecWorker) :
                     self._cus_to_cancel.remove(cu['_id'])
                     self._scheduler.unschedule(cu)
 
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.CANCELED,
-                                                  msg    = "unit execution canceled")
-                    prof('final', msg="execution canceled", uid=cu['_id'], tag='watching')
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.CANCELED,
+                                            msg    = "unit execution canceled")
+                    prof('final', msg="execcanceled", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
 
@@ -3508,10 +3508,10 @@ class ExecWorker_POPEN (ExecWorker) :
                 if exit_code != 0:
 
                     # The unit failed, no need to deal with its output data.
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.FAILED,
-                                                  msg    = "unit execution failed")
-                    prof('final', msg="execution failed", uid=cu['_id'], tag='watching')
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.FAILED,
+                                            msg    = "unit execution failed")
+                    prof('final', msg="execfailed", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
 
@@ -3520,9 +3520,9 @@ class ExecWorker_POPEN (ExecWorker) :
                     # output data.  We always move to stageout, even if there are no
                     # directives -- at the very least, we'll upload stdout/stderr
 
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.STAGING_OUTPUT,
-                                                  msg    = "unit execution completed")
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.STAGING_OUTPUT,
+                                            msg    = "unit execution completed")
                     cu_list = blowup (cu, STAGEOUT) 
                     for _cu in cu_list :
                         prof('push', msg="toward stageout", uid=_cu['_id'], tag='watching')
@@ -3630,7 +3630,7 @@ class ExecWorker_SHELL(ExecWorker):
                         launcher = self._task_launcher
 
                     if not launcher:
-                        self._agent.update_unit_state(
+                        self._agent.update_unit(
                                 uid    = cu['_id'],
                                 state  = rp.FAILED,
                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
@@ -3660,10 +3660,10 @@ class ExecWorker_SHELL(ExecWorker):
                     if cu['opaque_slot']:
                         self._scheduler.unschedule(cu)
 
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.FAILED,
-                                                  msg    = "unit execution failed",
-                                                  logger = self._log.exception)
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.FAILED,
+                                            msg    = "unit execution failed",
+                                            logger = self._log.exception)
 
 
         except Exception as e:
@@ -3831,9 +3831,9 @@ class ExecWorker_SHELL(ExecWorker):
         with self._registry_lock :
             self._registry[pid] = cu
 
-        self._agent.update_unit_state(uid    = cu['_id'],
-                                      state  = rp.EXECUTING,
-                                      msg    = "unit execution started")
+        self._agent.update_unit(uid    = cu['_id'],
+                                state  = rp.EXECUTING,
+                                msg    = "unit execution started")
         # FIXME: add profiling
 
 
@@ -3966,16 +3966,16 @@ class ExecWorker_SHELL(ExecWorker):
         if rp_state in [rp.FAILED, rp.CANCELED] :
             # final state - no further state transition needed
             self._scheduler.unschedule(cu)
-            self._agent.update_unit_state(uid   = cu['_id'],
-                                          state = rp_state, 
-                                          msg   = "unit execution finished")
+            self._agent.update_unit(uid   = cu['_id'],
+                                    state = rp_state, 
+                                    msg   = "unit execution finished")
 
         elif rp_state in [rp.DONE] :
             # advance the unit state
             self._scheduler.unschedule(cu)
-            self._agent.update_unit_state(uid   = cu['_id'],
-                                          state = rp.STAGING_OUTPUT,
-                                          msg   = "unit execution completed")
+            self._agent.update_unit(uid   = cu['_id'],
+                                    state = rp.STAGING_OUTPUT,
+                                    msg   = "unit execution completed")
 
             cu_list = blowup (cu, STAGEOUT) 
             for _cu in cu_list :
@@ -4102,24 +4102,22 @@ class StageinWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        self._agent.update_unit_state(uid    = cu['_id'],
-                                                      state  = rp.FAILED,
-                                                      msg    = log_message,
-                                                      query  = {
-                                                          'Agent_Input_Status'             : rp.EXECUTING,
+                        self._agent.update_unit(uid    = cu['_id'],
+                                                state  = rp.FAILED,
+                                                msg    = log_message,
+                                                query  = {'Agent_Input_Status'             : rp.EXECUTING,
                                                           'Agent_Input_Directives.state'   : rp.PENDING,
                                                           'Agent_Input_Directives.source'  : directive['source'],
                                                           'Agent_Input_Directives.target'  : directive['target']
-                                                      },
-                                                      update = {
-                                                          '$set' : {'Agent_Input_Directives.$.state'  : rp.FAILED,
+                                                         },
+                                                update = {'$set' : {'Agent_Input_Directives.$.state'  : rp.FAILED,
                                                                     'Agent_Input_Status'              : rp.FAILED}
-                                                      })
+                                                         })
 
                 # cu staging is all done, unit can go to execution
-                self._agent.update_unit_state(uid    = cu['_id'],
-                                              state  = rp.ALLOCATING,
-                                              msg    = 'agent input staging done')
+                self._agent.update_unit(uid    = cu['_id'],
+                                        state  = rp.ALLOCATING,
+                                        msg    = 'agent input staging done')
                 cu_list = blowup (cu, SCHEDULE) 
                 for _cu in cu_list :
                     prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
@@ -4278,19 +4276,19 @@ class StageoutWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        self._agent.update_unit_state(uid    = cu['_id'],
-                                                      state  = rp.FAILED,
-                                                      msg    = log_message,
-                                                      query  = {
-                                                          'Agent_Output_Status'            : rp.EXECUTING,
-                                                          'Agent_Output_Directives.state'  : rp.PENDING,
-                                                          'Agent_Output_Directives.source' : directive['source'],
-                                                          'Agent_Output_Directives.target' : directive['target']
-                                                      },
-                                                      update = {
-                                                          '$set' : {'Agent_Output_Directives.$.state' : rp.FAILED,
-                                                                    'Agent_Output_Status'             : rp.FAILED}
-                                                      })
+                        self._agent.update_unit(uid    = cu['_id'],
+                                                state  = rp.FAILED,
+                                                msg    = log_message,
+                                                query  = {
+                                                    'Agent_Output_Status'            : rp.EXECUTING,
+                                                    'Agent_Output_Directives.state'  : rp.PENDING,
+                                                    'Agent_Output_Directives.source' : directive['source'],
+                                                    'Agent_Output_Directives.target' : directive['target']
+                                                },
+                                                update = {
+                                                    '$set' : {'Agent_Output_Directives.$.state' : rp.FAILED,
+                                                              'Agent_Output_Status'             : rp.FAILED}
+                                                })
 
 
                 # local staging is done. Now check if there are Directives that
@@ -4323,19 +4321,19 @@ class StageoutWorker(threading.Thread):
                     # no FTW staging is needed, local staging is done -- we can
                     # move the unit into final state.
                     prof('final', msg="stageout done", uid=cu['_id'], tag='stageout')
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.DONE,
-                                                  msg    = 'output staging completed',
-                                                  update = {
-                                                      '$set' : {
-                                                          'stdout'    : cu['stdout'],
-                                                          'stderr'    : cu['stderr'],
-                                                          'exit_code' : cu['exit_code'],
-                                                          'started'   : cu['started'],
-                                                          'finished'  : cu['finished'],
-                                                          'slots'     : cu['opaque_slot'],
-                                                      }
-                                                  })
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.DONE,
+                                            msg    = 'output staging completed',
+                                            update = {
+                                                '$set' : {
+                                                    'stdout'    : cu['stdout'],
+                                                    'stderr'    : cu['stderr'],
+                                                    'exit_code' : cu['exit_code'],
+                                                    'started'   : cu['started'],
+                                                    'finished'  : cu['finished'],
+                                                    'slots'     : cu['opaque_slot'],
+                                                }
+                                            })
                     # NOTE: this is final, the cu is not touched anymore
                     cu = None
 
@@ -4351,19 +4349,19 @@ class StageoutWorker(threading.Thread):
                 # invalid state transitions...
                 if cu:
                     prof('final', msg="stageout failed", uid=cu['_id'], tag='stageout')
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.FAILED,
-                                                  msg    = 'output staging failed',
-                                                  update = {
-                                                      '$set' : {
-                                                          'stdout'    : cu['stdout'],
-                                                          'stderr'    : cu['stderr'],
-                                                          'exit_code' : cu['exit_code'],
-                                                          'started'   : cu['started'],
-                                                          'finished'  : cu['finished'],
-                                                          'slots'     : cu['opaque_slot'],
-                                                      }
-                                                  })
+                    self._agent.update_unit(uid    = cu['_id'],
+                                            state  = rp.FAILED,
+                                            msg    = 'output staging failed',
+                                            update = {
+                                                '$set' : {
+                                                    'stdout'    : cu['stdout'],
+                                                    'stderr'    : cu['stderr'],
+                                                    'exit_code' : cu['exit_code'],
+                                                    'started'   : cu['started'],
+                                                    'finished'  : cu['finished'],
+                                                    'slots'     : cu['opaque_slot'],
+                                                }
+                                            })
                     # NOTE: this is final, the cu is not touched anymore
                     cu = None
                 raise
@@ -4642,28 +4640,42 @@ class Agent(object):
 
     # --------------------------------------------------------------------------
     #
-    def update_unit(self, uid, state=None, msg=None, query=None, update=None):
+    def update_unit(self, uid, state=None, msg=None, query=None, update=None,
+                    logger=None):
 
-        if not query  : query  = dict()
-        if not update : update = dict()
+        now = timestamp ()
 
-        query_dict  = dict()
-        update_dict = update
+        if  logger and msg:
+            if state : logger("unit '%s' state change: %s" % (uid, msg))
+            else     : logger("unit '%s' update: %s"       % (uid, msg))
+
+        # use pseudo-deep copies
+        query_dict  = dict(query)  if query  else dict()
+        update_dict = dict(update) if update else dict()
 
         query_dict['_id'] = uid
 
-        for key,val in query.iteritems():
-            query_dict[key] = val
+        if state :
+            if not '$set'  in update_dict : update_dict['$set']  = dict()
+            if not '$push' in update_dict : update_dict['$push'] = dict()
 
+            # this assumes that 'state' and 'stathistory' are not yet in the
+            # updated dict -- otherwise they are overwritten...
+            update_dict['$set']['state'] = state
+            update_dict['$push']['statehistory'] = { 'state'     : state,
+                                                     'timestamp' : now}
 
         if msg:
-            if not '$push' in update_dict:
-                update_dict['$push'] = dict()
+            if not '$push' in update_dict : update_dict['$push'] = dict()
 
+            # this assumes that 'log' is not yet in the update_dict -- otherwise
+            # it will be overwritten...
             update_dict['$push']['log'] = {'message'   : msg,
                                            'timestamp' : timestamp()}
 
+        # we can artificially increase the load on the updater
         query_list = blowup (query_dict, UPDATE) 
+
         for query_dict in query_list :
             prof('push', msg="towards update (%s)" % state, uid=query_dict['_id'])
             self._update_queue.put({'uid'    : query_dict['_id'],
@@ -4671,47 +4683,6 @@ class Agent(object):
                                     'cbase'  : '.cu',
                                     'query'  : query_dict,
                                     'update' : update_dict})
-
-
-    # --------------------------------------------------------------------------
-    #
-    def update_unit_state(self, uid, state, msg=None, query=None, update=None,
-            logger=None):
-
-        if not query  : query  = dict()
-        if not update : update = dict()
-
-        if  logger and msg:
-            logger("unit '%s' state change (%s)" % (uid, msg))
-
-        # we alter update, so rather use a copy of the dict...
-
-        now = timestamp()
-        update_dict = {
-                '$set' : {
-                    'state' : state
-                },
-                '$push': {
-                    'statehistory' : {
-                        'state'     : state,
-                        'timestamp' : now
-                    }
-                }
-            }
-
-        if '$set' in update:
-            for key,val in update['$set'].iteritems():
-                update_dict['$set'][key] = val
-
-        if '$push' in update:
-            for key,val in update['$push'].iteritems():
-                update_dict['$push'][key] = val
-
-        self.update_unit(uid    = uid,
-                         state  = state,
-                         msg    = msg,
-                         query  = query,
-                         update = update_dict)
 
 
     # --------------------------------------------------------------------------
@@ -4858,18 +4829,18 @@ class Agent(object):
                 # and send to staging / execution, respectively
                 if cu['Agent_Input_Directives']:
 
-                    self.update_unit_state(uid    = cu['_id'],
-                                           state  = rp.STAGING_INPUT,
-                                           msg    = 'unit needs input staging')
+                    self.update_unit(uid    = cu['_id'],
+                                     state  = rp.STAGING_INPUT,
+                                     msg    = 'unit needs input staging')
                     cu_list = blowup (cu, STAGEIN) 
                     for _cu in cu_list :
                         prof('push', msg="towards stagein", uid=_cu['_id'], tag='ingest')
                         self._stagein_queue.put(_cu)
 
                 else:
-                    self.update_unit_state(uid    = cu['_id'],
-                                           state  = rp.ALLOCATING,
-                                           msg    = 'unit needs no input staging')
+                    self.update_unit(uid    = cu['_id'],
+                                     state  = rp.ALLOCATING,
+                                     msg    = 'unit needs no input staging')
                     cu_list = blowup (cu, SCHEDULE) 
                     for _cu in cu_list :
                         prof('push', msg="towards scheduling", uid=_cu['_id'], tag='ingest')
@@ -4881,9 +4852,9 @@ class Agent(object):
                 # a queue (its always the last step).  We set it to FAILED
                 msg = "could not sort unit (%s)" % e
                 prof('error', msg=msg, tag="failed", uid=cu['_id'], logger=self._log.exception)
-                self.update_unit_state(uid    = cu['_id'],
-                                       state  = rp.FAILED,
-                                       msg    = msg)
+                self.update_unit(uid    = cu['_id'],
+                                 state  = rp.FAILED,
+                                 msg    = msg)
                 # NOTE: this is final, the unit will not be touched
                 # anymore.
                 cu = None
