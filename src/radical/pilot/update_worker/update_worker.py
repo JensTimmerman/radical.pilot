@@ -6,19 +6,9 @@ import threading
 import Queue
 import time
 
-# needed?
-import pymongo
-import os
-import sys
-import datetime
-
-# FIXME: into config
-# max time period to collec db requests into bulks (seconds)
-BULK_COLLECTION_TIME = 1.0
-
-# FIXME: into config
-# time to sleep between queue polls (seconds)
-QUEUE_POLL_SLEEPTIME = 0.1
+import radical.utils       as ru
+import radical.pilot       as rp
+import radical.pilot.utils as rpu
 
 
 # FIXME: into config
@@ -28,133 +18,26 @@ AGENT_MPROC    = 'multiprocess'
 AGENT_MODE     = AGENT_THREADED
 
 
-# ------------------------------------------------------------------------------
-#
-# FIXME: into config
-#
-def get_mongodb(mongodb_url, mongodb_name, mongodb_auth):
-
-    mongo_client = pymongo.MongoClient(mongodb_url)
-    mongo_db     = mongo_client[mongodb_name]
-
-    # do auth on username *and* password (ignore empty split results)
-    auth_elems = filter(None, mongodb_auth.split(':', 1))
-    if len(auth_elems) == 2:
-        mongo_db.authenticate(auth_elems[0], auth_elems[1])
-
-    return mongo_db
-
-# ------------------------------------------------------------------------------
-#
-# time stamp for profiling etc.
-#
-def timestamp():
-    # human readable absolute UTC timestamp for log entries in database
-    return datetime.datetime.utcnow()
-
-def timestamp_epoch():
-    # absolute timestamp as seconds since epoch
-    return float(time.time())
-
-# absolute timestamp in seconds since epocj pointing at start of
-# bootstrapper (or 'now' as fallback)
-timestamp_zero = float(os.environ.get('TIME_ZERO', time.time()))
-
-print "timestamp zero: %s" % timestamp_zero
-
-def timestamp_now():
-    # relative timestamp seconds since TIME_ZERO (start)
-    return float(time.time()) - timestamp_zero
-
-
-# ------------------------------------------------------------------------------
-#
-# profiling support
-#
-# If 'RADICAL_PILOT_PROFILE' is set in environment, the agent logs timed events.
-#
-if 'RADICAL_PILOT_PROFILE' in os.environ:
-    profile_agent  = True
-    profile_handle = open('agent.prof', 'a')
-else:
-    profile_agent  = False
-    profile_handle = sys.stdout
-
-
-# ------------------------------------------------------------------------------
-#
-profile_tags  = dict()
-profile_freqs = dict()
-
-def prof(etype, uid="", msg="", tag="", logger=None):
-
-    # record a timed event.  We record the thread ID, the uid of the affected
-    # object, a log message, event type, and a tag.  Whenever a tag changes (to
-    # a non-None value), the time since the last tag change is added.  This can
-    # be used to derive, for example, the duration which a uid spent in
-    # a certain state.  Time intervals between the same tags (but different
-    # uids) are recorded, too.
-    #
-    # TODO: should this move to utils?  Or at least RP utils, so that we can
-    # also use it for the application side?
-
-    if logger:
-        logger("%s -- %s (%s): %s", etype, msg, uid, tag)
-
-
-    if not profile_agent:
-        return
-
-
-    logged = False
-    now    = timestamp_now()
-
-    if   AGENT_MODE == AGENT_THREADED : tid = threading.current_thread().name
-    elif AGENT_MODE == AGENT_MPROC    : tid = os.getpid ()
-
-    if uid and tag:
-
-        if not uid in profile_tags:
-            profile_tags[uid] = {'tag'  : "",
-                                 'time' : 0.0 }
-
-        old_tag = profile_tags[uid]['tag']
-
-        if tag != old_tag:
-
-            tagged_time = now - profile_tags[uid]['time']
-
-            profile_tags[uid]['tag' ] = tag
-            profile_tags[uid]['time'] = timestamp_now()
-
-            profile_handle.write("> %12.4f : %-20s : %12.4f : %-17s : %-24s : %-40s : %s\n" \
-                                 % (tagged_time, tag, now, tid, uid, etype, msg))
-            logged = True
-
-
-            if not tag in profile_freqs:
-                profile_freqs[tag] = {'last'  : now,
-                                      'diffs' : list()}
-            else:
-                diff = now - profile_freqs[tag]['last']
-                profile_freqs[tag]['diffs'].append(diff)
-                profile_freqs[tag]['last' ] = now
-
-              # freq = sum(profile_freqs[tag]['diffs']) / len(profile_freqs[tag]['diffs'])
-              #
-              # profile_handle.write("> %12s : %-20.4f : %12s : %-17s : %-24s : %-40s : %s\n" \
-              #                      % ('frequency', freq, '', '', '', '', ''))
-
-
-
-    if not logged:
-        profile_handle.write("  %12s : %-20s : %12.4f : %-17s : %-24s : %-40s : %s\n" \
-                             % (' ' , ' ', now, tid, uid, etype, msg))
-  
-    # FIXME: disable flush on production runs
-    profile_handle.flush()
-
-
+default_config_dict = {
+    # directory for staging files inside the agent sandbox
+    'staging_area'         : 'staging_area',
+    
+    # max number of cu out/err chars to push to db
+    'max_io_loglength'     : 1*1024,
+    
+    # max time period to collec db requests into bulks (seconds)
+    'bulk_collection_time' : 1.0,
+    
+    # time to sleep between queue polls (seconds)
+    'queue_poll_sleeptime' : 0.1,
+    
+    # time to sleep between database polls (seconds)
+    'db_poll_sleeptime'    : 0.5,
+    
+    # time between checks of internal state and commands from mothership (seconds)
+    'heartbeat_interval'   : 10,
+}
+config_dict = default_config_dict
 
 
 
@@ -165,7 +48,7 @@ class UpdateWorker(threading.Thread):
     An UpdateWorker pushes CU and Pilot state updates to mongodb.  Its instances
     compete for update requests on the update_queue.  Those requests will be
     triplets of collection name, query dict, and update dict.  Update requests
-    will be collected into bulks over some time (BULK_COLLECTION_TIME), to
+    will be collected into bulks over some time (bulk_collection_time), to
     reduce number of roundtrips.
     """
 
@@ -183,7 +66,7 @@ class UpdateWorker(threading.Thread):
         self._update_queue  = update_queue
         self._terminate     = threading.Event()
 
-        self._mongo_db      = get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
+        self._mongo_db      = rpu.get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
         self._cinfo         = dict()  # collection cache
 
         # run worker thread
@@ -213,14 +96,14 @@ class UpdateWorker(threading.Thread):
                 now = time.time()
                 age = now - cinfo['last']
 
-                if cinfo['bulk'] and age > BULK_COLLECTION_TIME:
+                if cinfo['bulk'] and age > config_dict['bulk_collection_time']:
 
                     res  = cinfo['bulk'].execute()
                     self._log.debug("bulk update result: %s", res)
 
-                    prof('state update bulk pushed (%d)' % len(cinfo['uids'].keys ()))
+                    rpu.prof('state update bulk pushed (%d)' % len(cinfo['uids'].keys ()))
                     for uid in cinfo['uids']:
-                        prof('state update pushed (%s)' % cinfo['uids'][uid], uid=uid)
+                        rpu.prof('state update pushed (%s)' % cinfo['uids'][uid], uid=uid)
 
                     cinfo['last'] = now
                     cinfo['bulk'] = None
@@ -244,7 +127,7 @@ class UpdateWorker(threading.Thread):
                         action += timed_bulk_execute(self._cinfo[cname])
 
                     if not action:
-                        time.sleep(QUEUE_POLL_SLEEPTIME)
+                        time.sleep(config_dict['queue_poll_sleeptime'])
 
                     continue
 
@@ -257,7 +140,7 @@ class UpdateWorker(threading.Thread):
                 query_dict  = update_request.get('query', dict())
                 update_dict = update_request.get('update',dict())
 
-                prof('state update pulled (%s)' % state, uid=uid)
+                rpu.prof('state update pulled (%s)' % state, uid=uid)
 
                 cname = self._session_id + cbase
 
@@ -280,7 +163,7 @@ class UpdateWorker(threading.Thread):
                              .update(update_dict)
 
                 timed_bulk_execute(cinfo)
-              # prof('state update bulked', uid=uid)
+              # rpu.prof('state update bulked', uid=uid)
 
             except Exception as e:
                 self._log.exception("state update failed (%s)", e)
