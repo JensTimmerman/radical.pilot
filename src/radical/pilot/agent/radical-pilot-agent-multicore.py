@@ -2789,60 +2789,129 @@ class LoadLevelerLRMS(LRMS):
                 # Detect BG board list
                 if "BG Node Board List: " in line:
                     loadl_bg_board_list_str = line.split(':')[1].strip()
+                elif "BG Midplane List: " in line:
+                    loadl_bg_midplane_list_str = line.split(':')[1].strip()
                 elif "BG Shape Allocated: " in line:
                     loadl_bg_block_shape_str = line.split(':')[1].strip()
+                elif "BG Size Allocated: " in line:
+                    loadl_bg_block_size_str = line.split(':')[1].strip()
             if not loadl_bg_board_list_str:
                 msg = "No board list found in llq output!"
                 self._log.error(msg)
                 raise Exception(msg)
+            self._log.debug("BG Node Board List: %s" % loadl_bg_board_list_str)
+            if not loadl_bg_midplane_list_str:
+                msg = "No midplane list found in llq output!"
+                self._log.error(msg)
+                raise Exception(msg)
+            self._log.debug("BG Midplane List: %s" % loadl_bg_midplane_list_str)
             if not loadl_bg_block_shape_str:
                 msg = "No board shape found in llq output!"
                 self._log.error(msg)
                 raise Exception(msg)
-
-            self.torus_dimension_labels = self.BGQ_DIMENSION_LABELS
+            self._log.debug("BG Shape Allocated: %s" % loadl_bg_block_shape_str)
+            if not loadl_bg_block_size_str:
+                msg = "No board size found in llq output!"
+                self._log.error(msg)
+                raise Exception(msg)
+            loadl_bg_block_size = int(loadl_bg_block_size_str)
+            self._log.debug("BG Size Allocated: %d" % loadl_bg_block_size)
 
             # Build nodes data structure to be handled by Torus Scheduler
-            self.torus_block = self._bgq_shapeandboards2block(
-                loadl_bg_block_shape_str, loadl_bg_board_list_str)
-            loadl_node_list = [entry[SchedulerTorus.TORUS_BLOCK_NAME] for entry in self.torus_block]
+            try:
+                self.torus_block = self._bgq_construct_block(
+                    loadl_bg_block_shape_str, loadl_bg_board_list_str,
+                    loadl_bg_block_size, loadl_bg_midplane_list_str)
+            except Exception as e:
+                msg = "Couldn't construct block."
+                self._log.error(msg)
+                raise Exception(msg)
+            self._log.debug("Torus block constructed:")
+            for e in self.torus_block:
+                self._log.debug("%s %s %s %s" %
+                                (e[0], [e[1][key] for key in sorted(e[1])], e[2], e[3]))
+
+            try:
+                loadl_node_list = [entry[SchedulerTorus.TORUS_BLOCK_NAME] for entry in self.torus_block]
+            except Exception as e:
+                msg = "Couldn't construct node list."
+                self._log.error(msg)
+                raise Exception(msg)
+            #self._log.debug("Node list constructed: %s" % loadl_node_list)
 
             # Construct sub-block table
-            self.shape_table = self._bgq_create_sub_block_shape_table(loadl_bg_block_shape_str)
+            try:
+                self.shape_table = self._bgq_create_sub_block_shape_table(loadl_bg_block_shape_str)
+            except Exception as e:
+                msg = "Couldn't construct shape table: %s" % e.message
+                self._log.error(msg)
+                raise Exception(msg)
+            self._log.debug("Shape table constructed: ")
+            for (size, dim) in [(key, self.shape_table[key]) for key in sorted(self.shape_table)]:
+                self._log.debug("%s %s" % (size, [dim[key] for key in sorted(dim)]))
 
             # Determine the number of cpus per node
             loadl_cpus_per_node = self.BGQ_CORES_PER_NODE
 
+            # BGQ Specific Torus labels
+            self.torus_dimension_labels = self.BGQ_DIMENSION_LABELS
+
         self.node_list = loadl_node_list
         self.cores_per_node = loadl_cpus_per_node
+
+        self._log.debug("Sleeping for #473 ...")
+        time.sleep(5)
+        self._log.debug("Configure done")
 
 
     # --------------------------------------------------------------------------
     #
     # Walk the block and return the node name for the given location
     #
-    def _bgq_nodename_by_loc(self, rack, midplane, board, node, location):
+    def _bgq_nodename_by_loc(self, rack, midplane, board, location):
 
-        for dim in self.BGQ_DIMENSION_LABELS:
+        self._log.debug("Starting nodebyname - r%d, m%d, b%d" % (rack, midplane, board))
+
+        first = True
+        node = self.BGQ_BLOCK_STARTING_CORNERS[board]
+
+        # TODO: Does the order of waling matter?
+        #       It might because of the starting blocks ...
+        for dim in self.BGQ_DIMENSION_LABELS: # [::-1]:
             max_length = location[dim]
+            self._log.debug("Within dim loop dim:%s, max_length: %d" % (dim, max_length))
 
             cur_length = 0
             # Loop while we are not at the final depth
             while cur_length < max_length:
+                self._log.debug("beginning of while loop, cur_length: %d" % cur_length)
 
                 if cur_length % 2 == 0:
-                    # If the current length is even,
-                    # we remain within the board,
-                    # and select the next node.
+                    # Stay within the board
                     node = self.BGQ_BOARD_TOPO[node][dim]
+
                 else:
-                    # Otherwise we jump to another midplane.
+                    # We jump to another board.
+                    self._log.debug("jumping to new board from board: %d, dim: %s)" % (board, dim))
                     board = self.BGQ_MIDPLANE_TOPO[board][dim]
+                    self._log.debug("board is now: %d" % board)
+
+                    # If we switch boards in the B dimension,
+                    # we seem to "land" at the opposite E dimension.
+                    if dim  == 'B':
+                        node = self.BGQ_BOARD_TOPO[node]['E']
+
+                self._log.debug("node is now: %d" % node)
 
                 # Increase the length for the next iteration
                 cur_length += 1
 
-        return 'R%.2d-M%.1d-N%.2d-J%.2d' % (rack, midplane, board, node)
+            self._log.debug("Wrapping inside dim loop dim:%s" % (dim))
+
+        nodename = 'R%.2d-M%.1d-N%.2d-J%.2d' % (rack, midplane, board, node)
+        self._log.debug("from location %s constructed node name: %s, left at board: %d" % (self.loc2str(location), nodename, board))
+
+        return nodename
 
 
     # --------------------------------------------------------------------------
@@ -2869,6 +2938,32 @@ class LoadLevelerLRMS(LRMS):
             board_dict_list.append(board_dict)
 
         return board_dict_list
+
+
+    # --------------------------------------------------------------------------
+    #
+    # Convert the midplane string as given by llq into a midplane structure
+    #
+    # E.g. 'R04-M0,R04-M1' =>
+    # [{'R': 4, 'M': 0}, {'R': 4, 'M': 1}]
+    #
+    #
+    def _bgq_str2midplanes(self, midplane_str):
+
+        midplanes = midplane_str.split(',')
+
+        midplane_dict_list = []
+        for midplane in midplanes:
+            elements = midplane.split('-')
+
+            midplane_dict = {}
+            # Take the first two labels
+            for l, e in zip(self.BGQ_BOARD_LABELS[:2], elements):
+                midplane_dict[l] = int(e.split(l)[1])
+
+            midplane_dict_list.append(midplane_dict)
+
+        return midplane_dict_list
 
 
     # --------------------------------------------------------------------------
@@ -2925,13 +3020,14 @@ class LoadLevelerLRMS(LRMS):
     #
     # Format: [(index, location, nodename, status), (i, c, n, s), ...]
     #
+    # TODO: This function and _bgq_nodename_by_loc should be changed so that we
+    #       only walk the torus once?
+    #
     def _bgq_get_block(self, rack, midplane, board, shape):
-
-        nodes = []
-        start_node = self.BGQ_BLOCK_STARTING_CORNERS[board]
 
         self._log.debug("Shape: %s", shape)
 
+        nodes = []
         index = 0
 
         for a in range(shape['A']):
@@ -2939,10 +3035,11 @@ class LoadLevelerLRMS(LRMS):
                 for c in range(shape['C']):
                     for d in range(shape['D']):
                         for e in range(shape['E']):
-                            location = {'A': a, 'B': b, 'C': c, 'D': d, 'E':e}
-                            nodename = self._bgq_nodename_by_loc(rack, midplane, board, start_node, location)
+                            location = {'A': a, 'B': b, 'C': c, 'D': d, 'E': e}
+                            nodename = self._bgq_nodename_by_loc(rack, midplane, board, location)
                             nodes.append([index, location, nodename, FREE])
                             index += 1
+
         return nodes
 
 
@@ -2950,31 +3047,86 @@ class LoadLevelerLRMS(LRMS):
     #
     # Use block shape and board list to construct block structure
     #
-    def _bgq_shapeandboards2block(self, block_shape_str, boards_str):
-
-        board_dict_list = self._bgq_str2boards(boards_str)
-        self._log.debug("Board dict list:\n%s", '\n'.join([str(x) for x in board_dict_list]))
-
-        # TODO: this assumes a single midplane block
-        rack     = board_dict_list[0]['R']
-        midplane = board_dict_list[0]['M']
-
-        board_list = [entry['N'] for entry in board_dict_list]
-        start_board = min(board_list)
+    # The 5 dimensions are denoted by the letters A, B, C, D, and E, T for the core (0-15).
+    # The latest dimension E is always 2, and is contained entirely within a midplane.
+    # For any compute block, compute nodes (as well midplanes for large blocks) are combined in 4 dimensions,
+    # only 4 dimensions need to be considered.
+    #
+    #  128 nodes: BG Shape Allocated: 2x2x4x4x2
+    #  256 nodes: BG Shape Allocated: 4x2x4x4x2
+    #  512 nodes: BG Shape Allocated: 1x1x1x1
+    #  1024 nodes: BG Shape Allocated: 1x1x1x2
+    #
+    def _bgq_construct_block(self, block_shape_str, boards_str,
+                            block_size, midplane_list_str):
 
         block_shape = self._bgq_str2shape(block_shape_str)
 
-        return self._bgq_get_block(rack, midplane, start_board, block_shape)
+        # TODO: Could check this, but currently _shape2num is part of the other class
+        #if self._shape2num_nodes(block_shape) != block_size:
+        #    self._log.error("Block Size doesn't match Block Shape")
+
+        # If the block is equal to or greater than a Midplane,
+        # then there is no board list provided.
+        # But because at that size, we have only full midplanes,
+        # we can construct it.
+
+        if block_size >= 1024:
+            raise NotImplemented("Currently multiple midplanes are not yet supported.")
+
+        elif block_size == 512:
+            # Full midplane
+
+            # BG Size: 1024, BG Shape: 1x1x1x2, BG Midplane List: R04-M0,R04-M1
+            midplane_dict_list = self._bgq_str2midplanes(midplane_list_str)
+
+            # Start of at the "lowest" available rack/midplane/board
+            # TODO: No other explanation than that this seems to be the convention?
+            rack = midplane_dict_list[0]['R'] # Assume they are all equal
+            midplane = min([entry['M'] for entry in midplane_dict_list])
+            board = 0
+
+            block_shape = self._bgq_str2shape('4x4x4x4x2') # Full midplane
+
+        else:
+            # Within single midplane, < 512 nodes
+
+            board_dict_list = self._bgq_str2boards(boards_str)
+            self._log.debug("Board dict list:\n%s", '\n'.join([str(x) for x in board_dict_list]))
+
+            rack     = board_dict_list[0]['R']
+            midplane = board_dict_list[0]['M']
+
+            # Start of at the "lowest" available board.
+            # TODO: No other explanation than that this seems to be the convention?
+            board = min([entry['N'] for entry in board_dict_list])
+
+        block = self._bgq_get_block(rack, midplane, board, block_shape)
+
+        return block
 
 
     # --------------------------------------------------------------------------
     #
     # Construction of sub-block shapes based on overall block allocation.
     #
+    # Depending on the size of the total allocated block, the maximum size
+    # of a subblock can be 512 nodes.
+    #
+    #
     def _bgq_create_sub_block_shape_table(self, shape_str):
 
         # Convert the shape string into dict structure
-        block_shape = self._bgq_str2shape(shape_str)
+        #
+        # For < 512 nodes: the dimensions within a midplane (AxBxCxDxE)
+        # For >= 512 nodes: the dimensions between the midplanes (AxBxCxD)
+        #
+        if len(shape_str.split('x')) == 5:
+            block_shape = self._bgq_str2shape(shape_str)
+        elif len(shape_str.split('x')) == 4:
+            block_shape = self._bgq_str2shape('4x4x4x4x2')
+        else:
+            raise Exception('Invalid shape string: %s' % shape_str)
 
         # Dict to store the results
         table = {}
@@ -3001,7 +3153,10 @@ class LoadLevelerLRMS(LRMS):
                     break
 
                 # Increase the length in this dimension for the next iteration.
-                sub_block_shape[dim] += 1
+                if sub_block_shape[dim] == 1:
+                    sub_block_shape[dim] = 2
+                elif sub_block_shape[dim] == 2:
+                    sub_block_shape[dim] = 4
 
         return table
 
