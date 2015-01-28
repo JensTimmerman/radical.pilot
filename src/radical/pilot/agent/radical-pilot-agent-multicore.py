@@ -274,7 +274,9 @@ COMMAND_KEEP_ALIVE          = "Keep_Alive"
 COMMAND_FIELD               = "commands"
 COMMAND_TYPE                = "type"
 COMMAND_ARG                 = "arg"
-COMMAND_RESCHEDULE          = "Reschedule"
+COMMAND_SCHEDULE            = "schedule"
+COMMAND_UNSCHEDULE          = "unschedule"
+COMMAND_RESCHEDULE          = "reschedule"
 COMMAND_CANCEL              = "Cancel"
 
 
@@ -535,7 +537,8 @@ class Scheduler(threading.Thread):
                 # got an allocation, go off and launch the process
                 # FIXME: state update toward EXECUTING (or is that done in
                 # launcher?)
-                rpu.prof('schedule', msg="allocated", uid=cu['_id'])
+                rpu.prof('schedule', msg="allocated", uid=cu['_id'], logger=self._log.warn)
+                self._log.info (self.slot_status(short=True))
                 cu_list = rpu.blowup (agent_config, cu, EXEC) 
                 for _cu in cu_list :
                     rpu.prof('push', msg="towards execution", uid=_cu['_id'])
@@ -560,7 +563,6 @@ class Scheduler(threading.Thread):
             if self._try_allocation(cu):
                 # yep, that worked - remove it from the wait queue
                 self._wait_queue.remove(cu)
-                rpu.prof('unqueue', msg="re-allocation done", uid=cu['_id'])
 
 
     # --------------------------------------------------------------------------
@@ -581,6 +583,7 @@ class Scheduler(threading.Thread):
                 if cu['opaque_slot']:
                     self._release_slot(cu['opaque_slot'])
                     slots_released = True
+                    self._log.info (self.slot_status(short=True))
 
             # notify the scheduling thread of released slots
             if slots_released:
@@ -614,17 +617,38 @@ class Scheduler(threading.Thread):
                     else:
                         self._log.error("Unknown scheduler command: %s (ignored)", command)
 
-                else:
+                elif isinstance(request, list) and len(request) == 2 :
 
+                    rtype = request[0]
+                    cu    = request[1]
 
-                    # we got a new unit.  Either we can place it straight away and
-                    # move it to execution, or we have to put it on the wait queue
-                    cu = request
-                    rpu.prof('schedule', msg="unit received", uid=cu['_id'])
-                    if not self._try_allocation(cu):
-                        # No resources available, put in wait queue
-                        self._wait_queue.append(cu)
-                        rpu.prof('queue', msg="allocation failed", uid=cu['_id'])
+                    if rtype == COMMAND_SCHEDULE :
+
+                        # we got a new unit to schedule.  Either we can place 
+                        # it straight away and move it to execution, or we have
+                        # to put it on the wait queue.
+                        rpu.prof('schedule', msg="unit received", uid=cu['_id'])
+                        if not self._try_allocation(cu):
+                            # No resources available, put in wait queue
+                            self._wait_queue.append(cu)
+                            rpu.prof('schedule', msg="allocation failed", uid=cu['_id'])
+
+                    elif rtype == COMMAND_UNSCHEDULE :
+
+                        # we got a finished unit, and can re-use its cores
+                        #
+                        # FIXME: we may want to handle this type of requests
+                        # with higher priority, so it might deserve a separate
+                        # queue.  Measure first though, then optimize...
+                        #
+                        # NOTE: unschedule() runs re-schedule, which probably
+                        # should be delayed until this bulk has been worked
+                        # on...
+                        rpu.prof('schedule', msg="unit deallocation", uid=cu['_id'])
+                        self.unschedule(cu)
+
+                else :
+                    raise ValueError ("cannot handle scheduler request '%s'", request)
 
 
             except Exception as e:
@@ -2968,8 +2992,8 @@ class ExecWorker(COMPONENT_TYPE):
     #
     def __init__(self, name, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue,
-                 execution_queue, update_queue, stageout_queue,
-                 pilot_id, session_id):
+                 execution_queue, stageout_queue, update_queue, 
+                 schedule_queue, pilot_id, session_id):
 
         rpu.prof('ExecWorker init')
 
@@ -2987,6 +3011,7 @@ class ExecWorker(COMPONENT_TYPE):
         self._execution_queue  = execution_queue
         self._stageout_queue   = stageout_queue
         self._update_queue     = update_queue
+        self._schedule_queue   = schedule_queue
         self._pilot_id         = pilot_id
         self._session_id       = session_id
 
@@ -3000,8 +3025,8 @@ class ExecWorker(COMPONENT_TYPE):
     @classmethod
     def create(cls, name, spawner, logger, agent, lrms, scheduler,
                task_launcher, mpi_launcher, command_queue, 
-               execution_queue, update_queue, stageout_queue,
-               pilot_id, session_id):
+               execution_queue, update_queue, schedule_queue, 
+               stageout_queue, pilot_id, session_id):
 
         # Make sure that we are the base-class!
         if cls != ExecWorker:
@@ -3015,8 +3040,8 @@ class ExecWorker(COMPONENT_TYPE):
 
             impl = implementation(name, logger, agent, lrms, scheduler,
                                   task_launcher, mpi_launcher, command_queue, 
-                                  execution_queue, update_queue, stageout_queue,
-                                  pilot_id, session_id)
+                                  execution_queue, stageout_queue, update_queue, 
+                                  schedule_queue, pilot_id, session_id)
             impl.start ()
             return impl
 
@@ -3064,9 +3089,9 @@ class ExecWorker_POPEN (ExecWorker) :
     # --------------------------------------------------------------------------
     #
     def __init__(self, name, logger, agent, lrms, scheduler,
-                 task_launcher, mpi_launcher, spawner, command_queue, 
-                 execution_queue, update_queue,
-                 pilot_id, session_id):
+                 task_launcher, mpi_launcher, command_queue, 
+                 execution_queue, stageout_queue, update_queue, 
+                 schedule_queue, pilot_id, session_id):
 
         rpu.prof('ExecWorker init')
 
@@ -3077,9 +3102,9 @@ class ExecWorker_POPEN (ExecWorker) :
 
 
         ExecWorker.__init__ (self, name, logger, agent, lrms, scheduler,
-                 task_launcher, mpi_launcher, spawner, command_queue, 
-                 execution_queue, update_queue,
-                 pilot_id, session_id)
+                 task_launcher, mpi_launcher, command_queue, 
+                 execution_queue, stageout_queue, update_queue, 
+                 schedule_queue, pilot_id, session_id)
 
 
         # run watcher thread
@@ -3184,8 +3209,7 @@ class ExecWorker_POPEN (ExecWorker) :
                     cu['stderr'] += "\nPilot cannot start compute unit: '%s'" % e
 
                     # Free the Slots, Flee the Flots, Ree the Frots!
-                    if cu['opaque_slot']:
-                        self._scheduler.unschedule(cu)
+                    self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
                     self._agent.update_unit(uid    = cu['_id'],
                                             state  = rp.FAILED,
@@ -3404,7 +3428,7 @@ class ExecWorker_POPEN (ExecWorker) :
                     action += 1
                     cu['proc'].kill()
                     self._cus_to_cancel.remove(cu['_id'])
-                    self._scheduler.unschedule(cu)
+                    self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
                     self._agent.update_unit(uid    = cu['_id'],
                                             state  = rp.CANCELED,
@@ -3422,8 +3446,8 @@ class ExecWorker_POPEN (ExecWorker) :
                 cu['finished']  = now
 
                 # Free the Slots, Flee the Flots, Ree the Frots!
-                self._scheduler.unschedule(cu)
                 self._cus_to_watch.remove(cu)
+                self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
                 if exit_code != 0:
 
@@ -3459,14 +3483,14 @@ class ExecWorker_SHELL(ExecWorker):
     # --------------------------------------------------------------------------
     #
     def __init__(self, name, logger, agent, lrms, scheduler,
-                 task_launcher, mpi_launcher, spawner, command_queue, 
-                 execution_queue, update_queue,
-                 pilot_id, session_id):
+                 task_launcher, mpi_launcher, command_queue, 
+                 execution_queue, stageout_queue, update_queue,
+                 schedule_queue, pilot_id, session_id):
 
         ExecWorker.__init__ (self, name, logger, agent, lrms, scheduler,
-                 task_launcher, mpi_launcher, spawner, command_queue, 
-                 execution_queue, update_queue,
-                 pilot_id, session_id)
+                 task_launcher, mpi_launcher, command_queue, 
+                 execution_queue, stageout_queue, update_queue,
+                 schedule_queue, pilot_id, session_id)
 
 
     # --------------------------------------------------------------------------
@@ -3578,9 +3602,7 @@ class ExecWorker_SHELL(ExecWorker):
                     cu['stderr'] += "\nPilot cannot start compute unit: '%s'" % e
 
                     # Free the Slots, Flee the Flots, Ree the Frots!
-                    if cu['opaque_slot']:
-                        self._scheduler.unschedule(cu)
-
+                    self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
                     self._agent.update_unit(uid    = cu['_id'],
                                             state  = rp.FAILED,
                                             msg    = "unit execution failed",
@@ -3887,14 +3909,14 @@ class ExecWorker_SHELL(ExecWorker):
 
         if rp_state in [rp.FAILED, rp.CANCELED] :
             # final state - no further state transition needed
-            self._scheduler.unschedule(cu)
+            self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
             self._agent.update_unit(uid   = cu['_id'],
                                     state = rp_state, 
                                     msg   = "unit execution finished")
 
         elif rp_state in [rp.DONE] :
             # advance the unit state
-            self._scheduler.unschedule(cu)
+            self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
             self._agent.update_unit(uid   = cu['_id'],
                                     state = rp.STAGING_OUTPUT,
                                     msg   = "unit execution completed")
@@ -4043,7 +4065,7 @@ class StageinWorker(threading.Thread):
                 cu_list = rpu.blowup (agent_config, cu, SCHEDULE) 
                 for _cu in cu_list :
                     rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
-                    self._schedule_queue.put(_cu)
+                    self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
 
 
             except Exception as e:
@@ -4501,6 +4523,7 @@ class Agent(object):
                 execution_queue = self._execution_queue,
                 stageout_queue  = self._stageout_queue,
                 update_queue    = self._update_queue,
+                schedule_queue  = self._schedule_queue,
                 pilot_id        = self._pilot_id,
                 session_id      = self._session_id
             )
@@ -4766,7 +4789,7 @@ class Agent(object):
                     cu_list = rpu.blowup (agent_config, cu, SCHEDULE) 
                     for _cu in cu_list :
                         rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='ingest')
-                        self._schedule_queue.put(_cu)
+                        self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
 
 
             except Exception as e:
