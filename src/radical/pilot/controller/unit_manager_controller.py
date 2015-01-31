@@ -544,7 +544,7 @@ class UnitManagerController(threading.Thread):
                         if source.scheme and source.scheme != 'file':
                             # If there is a scheme and it is different than "file",
                             # assume a remote pull from the agent
-                            unit.Agent_Input_Directives.append(new_sd)h!
+                            unit.Agent_Input_Directives.append(new_sd)
 
                             unit.Agent_Input_Status = PENDING
                         else:
