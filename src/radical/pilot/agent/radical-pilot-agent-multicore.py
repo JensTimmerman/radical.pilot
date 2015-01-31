@@ -135,10 +135,8 @@ import errno
 import Queue
 import signal
 import shutil
-import pymongo
 import optparse
 import logging
-import datetime
 import hostlist
 import traceback
 import threading
@@ -158,7 +156,7 @@ from operator import mul
 AGENT_THREADS   = 'threading'
 AGENT_PROCESSES = 'multiprocessing'
 
-AGENT_MODE      = AGENT_PROCESSES
+AGENT_MODE      = AGENT_THREADS
 
 if AGENT_MODE == AGENT_THREADS :
     COMPONENT_MODE = threading
@@ -250,6 +248,7 @@ LAUNCH_METHOD_RUNJOB        = 'RUNJOB'
 LAUNCH_METHOD_SSH           = 'SSH'
 
 # 'enum' for local resource manager types
+LRMS_NAME_CCM               = 'CCM'
 LRMS_NAME_FORK              = 'FORK'
 LRMS_NAME_LOADLEVELER       = 'LOADL'
 LRMS_NAME_LSF               = 'LSF'
@@ -332,6 +331,8 @@ def rec_makedir(target):
             raise
 
 
+# ------------------------------------------------------------------------------
+#
 def pilot_FAILED(mongo_p, pilot_uid, logger, message):
 
     logger.error(message)
@@ -554,7 +555,7 @@ class Scheduler(threading.Thread):
     #
     def _reschedule(self):
 
-        rpu.prof("try reschedule")
+        rpu.prof('reschedule')
         # cycle through wait queue, and see if we get anything running now.  We
         # cycle over a copy of the list, so that we can modify the list on the
         # fly
@@ -563,6 +564,9 @@ class Scheduler(threading.Thread):
             if self._try_allocation(cu):
                 # yep, that worked - remove it from the wait queue
                 self._wait_queue.remove(cu)
+
+        rpu.prof(self.slot_status (short=True))
+        rpu.prof('reschedule done')
 
 
     # --------------------------------------------------------------------------
@@ -573,6 +577,9 @@ class Scheduler(threading.Thread):
         # needs to be locked as we try to release slots, but slots are acquired
         # in a different thread....
         with self._lock :
+
+            rpu.prof('unschedule')
+            rpu.prof(self.slot_status (short=True))
 
             slots_released = False
 
@@ -588,6 +595,9 @@ class Scheduler(threading.Thread):
             # notify the scheduling thread of released slots
             if slots_released:
                 self._schedule_queue.put(COMMAND_RESCHEDULE)
+
+            rpu.prof(self.slot_status (short=True))
+            rpu.prof('unschedule done - reschedule')
 
 
     # --------------------------------------------------------------------------
@@ -1194,6 +1204,14 @@ class SchedulerTorus(Scheduler):
 #
 class LaunchMethod(object):
 
+    # List of environment variables that designated Launch Methods should export
+    EXPORT_ENV_VARIABLES = [
+        'LD_LIBRARY_PATH',
+        'PATH',
+        'PYTHONPATH',
+        'PYTHON_DIR',
+    ]
+
     # --------------------------------------------------------------------------
     #
     def __init__(self, name, logger, scheduler):
@@ -1210,7 +1228,6 @@ class LaunchMethod(object):
             raise Exception("Launch command not found for LaunchMethod '%s'" % name)
 
         logger.info("Discovered launch command: '%s'.", self.launch_command)
-
 
     # --------------------------------------------------------------------------
     #
@@ -1370,28 +1387,12 @@ class LaunchMethodMPIRUN(LaunchMethod):
         # Construct the hosts_string
         hosts_string = ",".join([slot.split(':')[0] for slot in task_slots])
 
-        export_vars = LaunchMethodMPIRUN.create_export_vars()
+        export_vars = ' '.join(['-x ' + var for var in self.EXPORT_ENV_VARIABLES if var in os.environ])
 
         mpirun_command = "%s %s -np %s -host %s %s" % (
             self.launch_command, export_vars, task_numcores, hosts_string, task_command)
 
         return mpirun_command, None
-
-
-    # --------------------------------------------------------------------------
-    #
-    @classmethod
-    def create_export_vars(cls):
-        # Class method so that other LM's can also benefit from this.
-        candidate_vars = [
-            'LD_LIBRARY_PATH',
-            'PATH',
-            'PYTHONPATH'
-            'PYTHON_DIR',
-            ]
-        export_vars = ' '.join(['-x ' + var for var in candidate_vars if var in os.environ])
-        return export_vars
-
 
 
 # ==============================================================================
@@ -1602,7 +1603,7 @@ class LaunchMethodMPIRUNCCMRUN(LaunchMethod):
         # TODO: is there any use in using $HOME/.crayccm/ccm_nodelist.$JOBID?
         hosts_string = ",".join([slot.split(':')[0] for slot in task_slots])
 
-        export_vars = LaunchMethodMPIRUN.create_export_vars()
+        export_vars = ' '.join(['-x ' + var for var in self.EXPORT_ENV_VARIABLES if var in os.environ])
 
         mpirun_ccmrun_command = "%s %s %s -np %d -host %s %s" % (
             self.launch_command, self.mpirun_command, export_vars,
@@ -1745,11 +1746,12 @@ class LaunchMethodMPIRUNRSH(LaunchMethod):
         # Construct the hosts_string ('h1 h2 .. hN')
         hosts_string = " ".join([slot.split(':')[0] for slot in task_slots])
 
-        mpirun_rsh_command = "%s -export -np %s %s %s" % (
-            self.launch_command, task_numcores, hosts_string, task_command)
+        export_vars = ' '.join([var+"=$"+var for var in self.EXPORT_ENV_VARIABLES if var in os.environ])
+
+        mpirun_rsh_command = "%s -np %s %s %s %s" % (
+            self.launch_command, task_numcores, hosts_string, export_vars, task_command)
 
         return mpirun_rsh_command, None
-
 
 
 # ==============================================================================
@@ -1942,6 +1944,7 @@ class LRMS(object):
 
         try:
             implementation = {
+                LRMS_NAME_CCM         : CCMLRMS,
                 LRMS_NAME_FORK        : ForkLRMS,
                 LRMS_NAME_LOADLEVELER : LoadLevelerLRMS,
                 LRMS_NAME_LSF         : LSFLRMS,
@@ -1960,6 +1963,49 @@ class LRMS(object):
     def _configure(self):
         raise NotImplementedError("_Configure not implemented for LRMS type: %s." % self.name)
 
+
+# ==============================================================================
+#
+class CCMLRMS(LRMS):
+    # --------------------------------------------------------------------------
+    #
+    def __init__(self, name, logger, requested_cores):
+
+        LRMS.__init__(self, name, logger, requested_cores)
+
+    # --------------------------------------------------------------------------
+    #
+    def _configure(self):
+
+        self._log.info("Configured to run on system with %s.", self.name)
+
+        CCM_NODEFILE_DIR = os.path.expanduser('~/.crayccm')
+
+        ccm_nodefile_list = os.listdir(CCM_NODEFILE_DIR)
+        ccm_nodefile_name = max(ccm_nodefile_list, key=lambda x:
+                              os.stat(os.path.join(CCM_NODEFILE_DIR, x)).st_mtime)
+        ccm_nodefile = os.path.join(CCM_NODEFILE_DIR, ccm_nodefile_name)
+
+        hostname = os.uname()[1]
+        if not hostname in open(ccm_nodefile).read():
+            raise Exception("Using the most recent CCM nodefile (%s),"
+                            " but I (%s) am not in it!" % (ccm_nodefile, hostname))
+
+        # Parse the CCM nodefile
+        ccm_nodes = [line.strip() for line in open(ccm_nodefile)]
+        self._log.info("Found CCM nodefile: %s.", ccm_nodefile)
+
+        # Get the number of raw entries
+        ccm_nodes_length = len(ccm_nodes)
+
+        # Unique nodes
+        ccm_node_list = list(set(ccm_nodes))
+        ccm_node_list_length = len(ccm_node_list)
+
+        # Some simple arithmetic
+        self.cores_per_node = ccm_nodes_length / ccm_node_list_length
+
+        self.node_list = ccm_node_list
 
 
 # ==============================================================================
@@ -2489,6 +2535,12 @@ class LoadLevelerLRMS(LRMS):
         15: {'A': 11, 'B':  7, 'C': 14, 'D': 13},
         }
 
+    # --------------------------------------------------------------------------
+    #
+    # Shape of whole BG/Q Midplane
+    #
+    BGQ_MIDPLANE_SHAPE = {'A': 4, 'B': 4, 'C': 4, 'D': 4, 'E': 2} # '4x4x4x4x2'
+
 
     # --------------------------------------------------------------------------
     #
@@ -2602,7 +2654,7 @@ class LoadLevelerLRMS(LRMS):
                     loadl_bg_block_shape_str, loadl_bg_board_list_str,
                     loadl_bg_block_size, loadl_bg_midplane_list_str)
             except Exception as e:
-                msg = "Couldn't construct block."
+                msg = "Couldn't construct block: %s" % e.message
                 self._log.error(msg)
                 raise Exception(msg)
             self._log.debug("Torus block constructed:")
@@ -2647,14 +2699,13 @@ class LoadLevelerLRMS(LRMS):
     #
     # Walk the block and return the node name for the given location
     #
-    def _bgq_nodename_by_loc(self, rack, midplane, board, location):
+    def _bgq_nodename_by_loc(self, midplanes, board, location):
 
-        self._log.debug("Starting nodebyname - r%d, m%d, b%d" % (rack, midplane, board))
+        self._log.debug("Starting nodebyname - midplanes:%s, board:%d" % (midplanes, board))
 
-        first = True
         node = self.BGQ_BLOCK_STARTING_CORNERS[board]
 
-        # TODO: Does the order of waling matter?
+        # TODO: Does the order of walking matter?
         #       It might because of the starting blocks ...
         for dim in self.BGQ_DIMENSION_LABELS: # [::-1]:
             max_length = location[dim]
@@ -2686,6 +2737,11 @@ class LoadLevelerLRMS(LRMS):
                 cur_length += 1
 
             self._log.debug("Wrapping inside dim loop dim:%s" % (dim))
+
+        # TODO: This will work for midplane expansion in one dimension only
+        midplane_idx = max(location.values()) / 4
+        rack = midplanes[midplane_idx]['R']
+        midplane = midplanes[midplane_idx]['M']
 
         nodename = 'R%.2d-M%.1d-N%.2d-J%.2d' % (rack, midplane, board, node)
         self._log.debug("from location %s constructed node name: %s, left at board: %d" % (self.loc2str(location), nodename, board))
@@ -2765,6 +2821,30 @@ class LoadLevelerLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
+    # Multiply two shapes
+    #
+    def _multiply_shapes(self, shape1, shape2):
+
+        result = {}
+
+        for dim in self.BGQ_DIMENSION_LABELS:
+            try:
+                val1 = shape1[dim]
+            except KeyError:
+                val1 = 1
+
+            try:
+                val2 = shape2[dim]
+            except KeyError:
+                val2 = 1
+
+            result[dim] = val1 * val2
+
+        return result
+
+
+    # --------------------------------------------------------------------------
+    #
     # Convert location dict into a tuple string
     # E.g. {'A': 1, 'C': 4, 'B': 1, 'E': 2, 'D': 4} => '(1,4,1,2,4)'
     #
@@ -2802,7 +2882,7 @@ class LoadLevelerLRMS(LRMS):
     # TODO: This function and _bgq_nodename_by_loc should be changed so that we
     #       only walk the torus once?
     #
-    def _bgq_get_block(self, rack, midplane, board, shape):
+    def _bgq_get_block(self, midplanes, board, shape):
 
         self._log.debug("Shape: %s", shape)
 
@@ -2815,7 +2895,7 @@ class LoadLevelerLRMS(LRMS):
                     for d in range(shape['D']):
                         for e in range(shape['E']):
                             location = {'A': a, 'B': b, 'C': c, 'D': d, 'E': e}
-                            nodename = self._bgq_nodename_by_loc(rack, midplane, board, location)
+                            nodename = self._bgq_nodename_by_loc(midplanes, board, location)
                             nodes.append([index, location, nodename, FREE])
                             index += 1
 
@@ -2839,10 +2919,10 @@ class LoadLevelerLRMS(LRMS):
     def _bgq_construct_block(self, block_shape_str, boards_str,
                             block_size, midplane_list_str):
 
-        block_shape = self._bgq_str2shape(block_shape_str)
+        llq_shape = self._bgq_str2shape(block_shape_str)
 
         # TODO: Could check this, but currently _shape2num is part of the other class
-        #if self._shape2num_nodes(block_shape) != block_size:
+        #if self._shape2num_nodes(llq_shape) != block_size:
         #    self._log.error("Block Size doesn't match Block Shape")
 
         # If the block is equal to or greater than a Midplane,
@@ -2851,21 +2931,35 @@ class LoadLevelerLRMS(LRMS):
         # we can construct it.
 
         if block_size >= 1024:
-            raise NotImplementedError("Currently multiple midplanes are not yet supported.")
+            #raise NotImplementedError("Currently multiple midplanes are not yet supported.")
+
+            # BG Size: 1024, BG Shape: 1x1x1x2, BG Midplane List: R04-M0,R04-M1
+            midplanes = self._bgq_str2midplanes(midplane_list_str)
+
+            # Start of at the "lowest" available rack/midplane/board
+            # TODO: No other explanation than that this seems to be the convention?
+            # TODO: Can we safely assume that they are sorted?
+            #rack = midplane_dict_list[0]['R']
+            #midplane = midplane_dict_list[0]['M']
+            board = 0
+
+            # block_shape = llq_shape * BGQ_MIDPLANE_SHAPE
+            block_shape = self._multiply_shapes(self.BGQ_MIDPLANE_SHAPE, llq_shape)
+            self._log.debug("Resulting shape after multiply: %s" % block_shape)
 
         elif block_size == 512:
             # Full midplane
 
             # BG Size: 1024, BG Shape: 1x1x1x2, BG Midplane List: R04-M0,R04-M1
-            midplane_dict_list = self._bgq_str2midplanes(midplane_list_str)
+            midplanes = self._bgq_str2midplanes(midplane_list_str)
 
             # Start of at the "lowest" available rack/midplane/board
             # TODO: No other explanation than that this seems to be the convention?
-            rack = midplane_dict_list[0]['R'] # Assume they are all equal
-            midplane = min([entry['M'] for entry in midplane_dict_list])
+            #rack = midplane_dict_list[0]['R'] # Assume they are all equal
+            #midplane = min([entry['M'] for entry in midplane_dict_list])
             board = 0
 
-            block_shape = self._bgq_str2shape('4x4x4x4x2') # Full midplane
+            block_shape = self.BGQ_MIDPLANE_SHAPE
 
         else:
             # Within single midplane, < 512 nodes
@@ -2873,14 +2967,21 @@ class LoadLevelerLRMS(LRMS):
             board_dict_list = self._bgq_str2boards(boards_str)
             self._log.debug("Board dict list:\n%s", '\n'.join([str(x) for x in board_dict_list]))
 
-            rack     = board_dict_list[0]['R']
-            midplane = board_dict_list[0]['M']
+            midplanes = [{'R': board_dict_list[0]['R'],
+                          'M': board_dict_list[0]['M']}]
 
             # Start of at the "lowest" available board.
             # TODO: No other explanation than that this seems to be the convention?
             board = min([entry['N'] for entry in board_dict_list])
 
-        block = self._bgq_get_block(rack, midplane, board, block_shape)
+            block_shape = llq_shape
+
+        # From here its all equal (assuming our walker does the walk and not just the talk!)
+        block = self._bgq_get_block(midplanes, board, block_shape)
+
+        # TODO: Check returned block:
+        #       - Length
+        #       - No duplicates
 
         return block
 
@@ -2903,7 +3004,7 @@ class LoadLevelerLRMS(LRMS):
         if len(shape_str.split('x')) == 5:
             block_shape = self._bgq_str2shape(shape_str)
         elif len(shape_str.split('x')) == 4:
-            block_shape = self._bgq_str2shape('4x4x4x4x2')
+            block_shape = self.BGQ_MIDPLANE_SHAPE
         else:
             raise Exception('Invalid shape string: %s' % shape_str)
 
@@ -3979,8 +4080,8 @@ class StageinWorker(threading.Thread):
                 if not cu:
                     continue
 
-                sandbox      = os.path.join(self._workdir, '%s' % cu['_id']),
-                staging_area = os.path.join(self._workdir, agent_config['staging_area']),
+                sandbox      = os.path.join(self._workdir, '%s' % cu['_id'])
+                staging_area = os.path.join(self._workdir, agent_config_dict['staging_area'])
 
                 for directive in cu['Agent_Input_Directives']:
                     rpu.prof('Agent input_staging queue', uid=cu['_id'], msg=directive)
@@ -4058,14 +4159,14 @@ class StageinWorker(threading.Thread):
                                                                     'Agent_Input_Status'              : rp.FAILED}
                                                          })
 
-                # cu staging is all done, unit can go to execution
-                self._agent.update_unit(uid    = cu['_id'],
-                                        state  = rp.ALLOCATING,
-                                        msg    = 'agent input staging done')
-                cu_list = rpu.blowup (agent_config, cu, SCHEDULE) 
-                for _cu in cu_list :
-                    rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
-                    self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
+              # # cu staging is all done, unit can go to execution
+              # self._agent.update_unit(uid    = cu['_id'],
+              #                         state  = rp.ALLOCATING,
+              #                         msg    = 'agent input staging done')
+              # cu_list = rpu.blowup (agent_config, cu, SCHEDULE) 
+              # for _cu in cu_list :
+              #     rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
+              #     self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
 
 
             except Exception as e:
@@ -4119,7 +4220,7 @@ class StageoutWorker(threading.Thread):
 
         self._log.info("started %s.", self)
 
-        staging_area = os.path.join(self._workdir, agent_config['staging_area']),
+        staging_area = os.path.join(self._workdir, agent_config_dict['staging_area'])
 
         while not self._terminate.is_set():
 
@@ -4131,7 +4232,7 @@ class StageoutWorker(threading.Thread):
                 if not cu:
                     continue
 
-                sandbox = os.path.join(self._workdir, '%s' % cu['_id']),
+                sandbox = os.path.join(self._workdir, '%s' % cu['_id'])
 
                 ## parked from unit state checker: unit postprocessing
 
@@ -4544,7 +4645,7 @@ class Agent(object):
 
 
         for n in range(agent_config['number_of_workers'][UPDATE]):
-            update_worker = rp.update_worker.UpdateWorker(
+            update_worker = radical.pilot.update_worker.UpdateWorker(
                 name            = "UpdateWorker-%d" % n,
                 agent           = self,
                 logger          = self._log,
@@ -4707,25 +4808,22 @@ class Agent(object):
 
         # Check if there are compute units waiting for execution,
         # and log that we pulled it.
-        cu_cursor = self._cu.find(multi = True,
-                                  spec  = {"pilot" : self._pilot_id,
-                                           "state" : rp.PENDING_EXECUTION})
-
-        if cu_cursor.count():
-            rpu.prof('Agent get units', msg="number of units: %d" % cu_cursor.count(),
-                 logger=self._log.info)
-
-
-        cu_list = list(cu_cursor)
-        cu_list = rpu.blowup (agent_config, cu_list, INGEST)
-        cu_uids = [_cu['_id'] for _cu in cu_list]
-
-
+        #
         # Unfortunately, 'find_and_modify' is not bulkable, so we have to use
         # 'find' above.  To avoid finding the same units over and over again, we
         # have to update the state *before* running the next find -- so we
         # do it right here...  No idea how to avoid that roundtrip...
-        if cu_uids:
+        # This also blocks us from using multiple ingest threads, or from doing
+        # late binding by unit pull...
+        cu_cursor  = self._cu.find(multi = True,
+                                   spec  = {"pilot" : self._pilot_id,
+                                            "state" : rp.PENDING_EXECUTION})
+
+        if cu_cursor.count():
+
+            cu_list = list(cu_cursor)
+            cu_uids = [_cu['_id'] for _cu in cu_list]
+
             self._cu.update(
                     multi    = True,
                     spec     = {"_id"   : {"$in"    : cu_uids}},
@@ -4736,9 +4834,42 @@ class Agent(object):
                                         "timestamp" : rpu.timestamp()
                                     }
                                }})
+        else :
+            # if we did not find any units which can be executed immediately, we
+            # chack if we have any units for which to do stage-in
+            cu_cursor = self._cu.find(multi = True,
+                                      spec  = {"pilot" : self._pilot_id,
+                                               'Agent_Input_Status': rp.PENDING})
+            if cu_cursor.count():
+
+                cu_list = list(cu_cursor)
+                cu_uids = [_cu['_id'] for _cu in cu_list]
+
+                self._cu.update(
+                        multi    = True,
+                        spec     = {"_id"   : {"$in"    : cu_uids}},
+                        document = {"$set"  : {"state"  : rp.STAGING_INPUT,
+                                               "Agent_Input_Status": rp.EXECUTING},
+                                    "$push" : {"statehistory":
+                                        {
+                                            "state"     : rp.STAGING_INPUT,
+                                            "timestamp" : rpu.timestamp()
+                                        }
+                                   }})
+            else :
+                # no units whatsoever...
+                return 0
 
         # now we really own the CUs, and can start working on them (ie. push
         # them into the pipeline)
+        rpu.prof('Agent get units', msg="number of units: %d" % len(cu_list),
+             logger=self._log.info)
+
+
+        # artificially increase load
+        cu_list = rpu.blowup (agent_config, cu_list, INGEST)
+
+
         for cu in cu_list:
 
             try:

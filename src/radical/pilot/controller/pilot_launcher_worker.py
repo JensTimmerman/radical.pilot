@@ -345,6 +345,7 @@ class PilotLauncherWorker(threading.Thread):
                         agent_mongodb_endpoint  = resource_cfg.get ('agent_mongodb_endpoint', database_url)
                         agent_spawner           = resource_cfg.get ('agent_spawner',       DEFAULT_AGENT_SPAWNER)
                         agent_scheduler         = resource_cfg.get ('agent_scheduler')
+                        tunnel_bind_device      = resource_cfg.get ('tunnel_bind_device')
                         default_queue           = resource_cfg.get ('default_queue')
                         forward_tunnel_endpoint = resource_cfg.get ('forward_tunnel_endpoint')
                         js_endpoint             = resource_cfg.get ('job_manager_endpoint')
@@ -416,7 +417,7 @@ class PilotLauncherWorker(threading.Thread):
                         #   stage  : stage pilot agent from local to target
                         #            resource
                         #
-                        # sourcen  :
+                        # source   :
                         #   tag    : a git tag
                         #   branch : a git branch
                         #   release: pypi release
@@ -450,7 +451,6 @@ class PilotLauncherWorker(threading.Thread):
                                       % (agent_version, DEFAULT_AGENT_VERSION))
                             agent_version = DEFAULT_AGENT_VERSION
 
-
                         agent_mode, agent_source = agent_version.split ('@', 1)
 
                         if not agent_mode or not agent_source :
@@ -466,8 +466,6 @@ class PilotLauncherWorker(threading.Thread):
                             agent_version = DEFAULT_AGENT_VERSION
                             agent_mode, agent_source = agent_version.split ('@', 1)
 
-
-
                         # we only stage the agent on agent_mode==stage --
                         # otherwise the bootstrapper will have to take care of
                         # it
@@ -482,14 +480,14 @@ class PilotLauncherWorker(threading.Thread):
                                 agent_path = os.path.abspath("%s/../agent/%s" % (mod_dir, agent_name))
 
                             else :
-                                # FIX: agent_name not set in this case!
-                                if  agent_source.startswith ('/') :
+                                agent_name = os.path.basename(agent_source)
+                                if  agent_source.startswith('/'):
                                     agent_path = agent_source
                                 else :
                                     agent_path = os.path.abspath("%s/%s" % (mod_dir, agent_source))
 
                             msg = "Using pilot agent %s" % agent_path
-                            logentries.append (Logentry (msg, logger=logger.info))
+                            logentries.append(Logentry (msg, logger=logger.info))
 
                             # --------------------------------------------------
                             # Copy the rp sdist 
@@ -522,6 +520,7 @@ class PilotLauncherWorker(threading.Thread):
                             # otherwise, we let the bootstrapper know what
                             # version to use
                             agent_version = agent_source
+                            agent_name = agent_source
 
 
                         # ------------------------------------------------------
@@ -562,7 +561,6 @@ class PilotLauncherWorker(threading.Thread):
 
                         # set mandatory args
                         bootstrap_args  = ""
-                        bootstrap_args += " -a '%s'" % database_auth
                         bootstrap_args += " -b '%s'" % sdist[:-7] # without '.tgz'
                         bootstrap_args += " -c '%s'" % number_cores
                         bootstrap_args += " -d '%s'" % debug_level
@@ -582,11 +580,18 @@ class PilotLauncherWorker(threading.Thread):
                         bootstrap_args += " -v '%s'" % agent_version
 
                         # set optional args
-                        if cleanup                 : bootstrap_args += " -x '%s'" % cleanup
-                        if forward_tunnel_endpoint : bootstrap_args += " -f '%s'" % forward_tunnel_endpoint
-                        if pre_bootstrap           : bootstrap_args += " -e '%s'" % "' -e '".join (pre_bootstrap)
-                        if python_interpreter      : bootstrap_args += " -i '%s'" % python_interpreter
-
+                        if database_auth:
+                            bootstrap_args += " -a '%s'" % database_auth
+                        if tunnel_bind_device:
+                            bootstrap_args += " -D '%s'" % tunnel_bind_device
+                        if pre_bootstrap:
+                            bootstrap_args += " -e '%s'" % "' -e '".join (pre_bootstrap)
+                        if forward_tunnel_endpoint:
+                            bootstrap_args += " -f '%s'" % forward_tunnel_endpoint
+                        if python_interpreter:
+                            bootstrap_args += " -i '%s'" % python_interpreter
+                        if cleanup:
+                            bootstrap_args += " -x '%s'" % cleanup
 
                         # ------------------------------------------------------
                         # now that the script is in place and we know where it is,

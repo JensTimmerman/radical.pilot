@@ -11,6 +11,7 @@
 # global variables
 #
 AUTH=
+TUNNEL_BIND_DEVICE="lo"
 CLEANUP=
 CORES=
 DBNAME=
@@ -151,7 +152,6 @@ unlock()
     entry="`dirname $entry`/`basename $entry`"
 
     lockfile="$entry.lock"
-
 
     if ! test -f $lockfile
     then
@@ -561,7 +561,7 @@ rp_install()
     # installed.  Failure to do so will only result in a warning though.
     echo "uninstalling RADICAL-Pilot"
     run_cmd "uninstall radical.pilot via pip" \
-            "yes | head -n 1 | pip uninstall radical.pilot || true" \
+            "pip uninstall -y radical.pilot || true" \
          || echo "Couldn't uninstall radical.pilot! Lets see how far we get ..."
 
     echo "Using RADICAL-Pilot update source '$RP_INSTALL_SOURCE'"
@@ -589,6 +589,11 @@ rp_install()
 find_available_port()
 {
     RANGE="23000..23100"
+    # TODO: Now that we have corrected the logic of checking on the localhost,
+    #       instead of the remote host, we need to improve the checking.
+    #       For now just return a fixed value.
+    AVAILABLE_PORT=23000
+
     echo ""
     echo "################################################################################"
     echo "## Searching for available TCP port for tunnel in range $RANGE."
@@ -657,11 +662,12 @@ echo "# -------------------------------------------------------------------"
 
 # parse command line arguments
 # free letters: b h o
-while getopts "a:b:c:d:e:f:g:hi:j:k:l:m:n:o:p:q:r:u:s:t:v:w:x:y:z:" OPTION; do
+while getopts "a:b:c:D:d:e:f:g:hi:j:k:l:m:n:o:p:q:r:u:s:t:v:w:x:y:z:" OPTION; do
     case $OPTION in
         a)  AUTH=$OPTARG  ;;
         b)  SDIST=$OPTARG  ;;
         c)  CORES=$OPTARG  ;;
+        D)  TUNNEL_BIND_DEVICE=$OPTARG ;;
         d)  DEBUG=$OPTARG  ;;
         e)  preprocess "$OPTARG"  ;;
         f)  FORWARD_TUNNEL_ENDPOINT=$OPTARG  ;;
@@ -688,7 +694,6 @@ done
 
 # Check that mandatory arguments are set
 # (Currently all that are passed through to the agent)
-if test -z "$AUTH"               ; then  usage "missing AUTH              ";  fi
 if test -z "$CORES"              ; then  usage "missing CORES             ";  fi
 if test -z "$DEBUG"              ; then  usage "missing DEBUG             ";  fi
 if test -z "$DBNAME"             ; then  usage "missing DBNAME            ";  fi
@@ -712,7 +717,13 @@ if [[ $FORWARD_TUNNEL_ENDPOINT ]]; then
     echo "# -------------------------------------------------------------------"
     echo "# Setting up forward tunnel for MongoDB to $FORWARD_TUNNEL_ENDPOINT."
 
-    find_available_port $FORWARD_TUNNEL_ENDPOINT
+    # Bind to localhost
+    BIND_ADDRESS=`/sbin/ifconfig $TUNNEL_BIND_DEVICE|grep "inet addr"|cut -f2 -d:|cut -f1 -d" "`
+
+    # Look for an available port to bind to.
+    # This might be necessary if multiple agents run on one host.
+    find_available_port $BIND_ADDRESS
+
     if [ $AVAILABLE_PORT ]; then
         echo "## Found available port: $AVAILABLE_PORT"
     else
@@ -720,10 +731,12 @@ if [[ $FORWARD_TUNNEL_ENDPOINT ]]; then
         exit 1
     fi
     DBPORT=$AVAILABLE_PORT
-    BIND_ADDRESS=127.0.0.1
 
     # Set up tunnel
-    ssh -o StrictHostKeyChecking=no -x -a -4 -T -N -L $BIND_ADDRESS:$DBPORT:$DBURL $FORWARD_TUNNEL_ENDPOINT &
+    # TODO: Extract port and host
+    FORWARD_TUNNEL_ENDPOINT_PORT=22
+    FORWARD_TUNNEL_ENDPOINT_HOST=$FORWARD_TUNNEL_ENDPOINT
+    ssh -o StrictHostKeyChecking=no -x -a -4 -T -N -L $BIND_ADDRESS:$DBPORT:$DBURL -p $FORWARD_TUNNEL_ENDPOINT_PORT $FORWARD_TUNNEL_ENDPOINT_HOST &
 
     # Kill ssh process when bootstrapper dies, to prevent lingering ssh's
     trap 'jobs -p | xargs kill' EXIT
@@ -763,19 +776,23 @@ else
 fi
 
 AGENT_CMD="python $PILOT_SCRIPT \
-    -a $AUTH \
-    -c $CORES \
-    -d $DEBUG \
-    -j $TASK_LAUNCH_METHOD \
-    -k $MPI_LAUNCH_METHOD \
-    -l $LRMS \
-    -m $DBURL \
-    -n $DBNAME \
-    -o $SPAWNER \
-    -p $PILOT_ID \
-    -q $SCHEDULER \
-    -s $SESSIONID \
-    -r $RUNTIME "
+-c $CORES \
+-d $DEBUG \
+-j $TASK_LAUNCH_METHOD \
+-k $MPI_LAUNCH_METHOD \
+-l $LRMS \
+-m $DBURL \
+-n $DBNAME \
+-o $SPAWNER \
+-p $PILOT_ID \
+-q $SCHEDULER \
+-s $SESSIONID \
+-r $RUNTIME"
+
+if ! test -z "$AUTH"
+then
+    AGENT_CMD="$AGENT_CMD -a $AUTH"
+fi
 
 echo
 echo "# -------------------------------------------------------------------"
@@ -812,4 +829,3 @@ echo "# -------------------------------------------------------------------"
 
 # ... and exit
 exit $AGENT_EXITCODE
-
