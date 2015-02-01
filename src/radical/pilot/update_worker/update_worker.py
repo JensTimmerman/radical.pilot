@@ -18,28 +18,6 @@ AGENT_MPROC    = 'multiprocess'
 AGENT_MODE     = AGENT_THREADED
 
 
-default_config_dict = {
-    # directory for staging files inside the agent sandbox
-    'staging_area'         : 'staging_area',
-    
-    # max number of cu out/err chars to push to db
-    'max_io_loglength'     : 1*1024,
-    
-    # max time period to collec db requests into bulks (seconds)
-    'bulk_collection_time' : 1.0,
-    
-    # time to sleep between queue polls (seconds)
-    'queue_poll_sleeptime' : 0.1,
-    
-    # time to sleep between database polls (seconds)
-    'db_poll_sleeptime'    : 0.5,
-    
-    # time between checks of internal state and commands from mothership (seconds)
-    'heartbeat_interval'   : 10,
-}
-config_dict = default_config_dict
-
-
 
 # ==============================================================================
 #
@@ -54,12 +32,13 @@ class UpdateWorker(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, session_id,
+    def __init__(self, name, config, logger, agent, session_id,
                  update_queue, mongodb_url, mongodb_name, mongodb_auth):
 
         threading.Thread.__init__(self)
 
         self.name           = name
+        self._config        = config
         self._log           = logger
         self._agent         = agent
         self._session_id    = session_id
@@ -96,7 +75,7 @@ class UpdateWorker(threading.Thread):
                 now = time.time()
                 age = now - cinfo['last']
 
-                if cinfo['bulk'] and age > config_dict['bulk_collection_time']:
+                if cinfo['bulk'] and age > self._config['bulk_collection_time']:
 
                     res  = cinfo['bulk'].execute()
                     self._log.debug("bulk update result: %s", res)
@@ -127,7 +106,7 @@ class UpdateWorker(threading.Thread):
                         action += timed_bulk_execute(self._cinfo[cname])
 
                     if not action:
-                        time.sleep(config_dict['queue_poll_sleeptime'])
+                        time.sleep(self._config['queue_poll_sleeptime'])
 
                     continue
 
@@ -169,6 +148,56 @@ class UpdateWorker(threading.Thread):
                 self._log.exception("unit update failed (%s)", e)
                 # FIXME: should we fail the pilot at this point?
                 # FIXME: Are the strategies to recover?
+
+
+    # --------------------------------------------------------------------------
+    #
+    @staticmethod
+    def update_unit(queue, cu, state=None, msg=None, query=None, 
+                    update=None, logger=None):
+
+        now = rpu.timestamp ()
+        uid = cu['_id']
+
+        if  logger and msg:
+            if state : logger("unit '%s' state change: %s" % (uid, msg))
+            else     : logger("unit '%s' update: %s"       % (uid, msg))
+
+        # use pseudo-deep copies
+        query_dict  = dict(query)  if query  else dict()
+        update_dict = dict(update) if update else dict()
+
+        query_dict['_id'] = uid
+
+        if state :
+            if not '$set'  in update_dict : update_dict['$set']  = dict()
+            if not '$push' in update_dict : update_dict['$push'] = dict()
+
+            # this assumes that 'state' and 'stathistory' are not yet in the
+            # updated dict -- otherwise they are overwritten...
+            update_dict['$set']['state'] = state
+            update_dict['$push']['statehistory'] = { 'state'     : state,
+                                                     'timestamp' : now}
+
+        if msg:
+            if not '$push' in update_dict : update_dict['$push'] = dict()
+
+            # this assumes that 'log' is not yet in the update_dict -- otherwise
+            # it will be overwritten...
+            update_dict['$push']['log'] = {'message'   : msg,
+                                           'timestamp' : rpu.timestamp()}
+
+        # we can artificially increase the load on the updater
+        query_list = rpu.blowup (agent_config, query_dict, UPDATE) 
+
+        for query in query_list :
+            rpu.prof('push', msg="towards update (%s)" % state, uid=query['_id'])
+            update_queue.put({'uid'    : query['_id'],
+                              'state'  : state,
+                              'cbase'  : '.cu',
+                              'query'  : query,
+                              'update' : update_dict})
+
 
 # ------------------------------------------------------------------------------
 

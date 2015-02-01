@@ -118,6 +118,16 @@
     - split the agent into logical components (classes?), and install along with
       RP.
     - add state asserts after `queue.get ()`
+    - move mkdir etc from ingest thread to where its used (input staging or
+      execution)
+    - the structure of the base scheduler should be suitable for both, UMGR
+      scheduling and Agent scheduling.  The algs will be different though,
+      mostly because the pilots (as targets of the umgr scheduler) have a wait
+      queue, but the cores (targets of the agent scheduler) have not.  Is it
+      worthwhile to re-use the structure anyway?
+    - all stop() methods need to be replaced with commands which travel through
+      the queues.  To deliver commands timely though we either need command
+      prioritization (difficult), or need separate command queues...
 
 """
 
@@ -147,7 +157,7 @@ import radical.utils       as ru
 import radical.pilot       as rp
 import radical.pilot.utils as rpu
 
-import radical.pilot.update_worker
+from radical.pilot.update_worker import UpdateWorker
 
 from operator import mul
 
@@ -276,7 +286,7 @@ COMMAND_ARG                 = "arg"
 COMMAND_SCHEDULE            = "schedule"
 COMMAND_UNSCHEDULE          = "unschedule"
 COMMAND_RESCHEDULE          = "reschedule"
-COMMAND_CANCEL              = "Cancel"
+COMMAND_CANCEL              = "cancel"
 
 
 # 'enum' for staging action operators
@@ -304,7 +314,7 @@ agent_config_dict = {
     'queue_poll_sleeptime' : 0.1,
     
     # time to sleep between database polls (seconds)
-    'db_poll_sleeptime'    : 0.5,
+    'db_poll_sleeptime'    : 0.1,
     
     # time between checks of internal state and commands from mothership (seconds)
     'heartbeat_interval'   : 10,
@@ -444,12 +454,13 @@ class Scheduler(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, lrms, schedule_queue, execution_queue,
+    def __init__(self, name, config, logger, lrms, schedule_queue, execution_queue,
                  update_queue):
 
         threading.Thread.__init__(self)
 
         self.name             = name
+        self._config          = config
         self._log             = logger
         self._lrms            = lrms
         self._schedule_queue  = schedule_queue
@@ -459,6 +470,7 @@ class Scheduler(threading.Thread):
         self._terminate       = threading.Event()
         self._lock            = threading.RLock()
         self._wait_queue      = list()
+        self._wait_queue_lock = threading.RLock()
 
         self._configure()
 
@@ -468,12 +480,12 @@ class Scheduler(threading.Thread):
     # This class-method creates the appropriate sub-class for the Launch Method.
     #
     @classmethod
-    def create(cls, logger, name, lrms, schedule_queue, execution_queue,
+    def create(cls, name, config, logger, lrms, schedule_queue, execution_queue,
                update_queue):
 
         # Make sure that we are the base-class!
         if cls != Scheduler:
-            raise Exception("Scheduler Factory only available to base class!")
+            raise TypeError("Scheduler Factory only available to base class!")
 
         try:
             implementation = {
@@ -482,14 +494,14 @@ class Scheduler(threading.Thread):
                 SCHEDULER_NAME_TORUS      : SchedulerTorus
             }[name]
 
-            impl = implementation(name, logger, lrms, schedule_queue,
+            impl = implementation(name, config, logger, lrms, schedule_queue,
                                   execution_queue, update_queue)
 
             impl.start()
             return impl
 
         except KeyError:
-            raise Exception("Scheduler '%s' unknown!" % name)
+            raise ValueError("Scheduler '%s' unknown!" % name)
 
 
     # --------------------------------------------------------------------------
@@ -506,7 +518,7 @@ class Scheduler(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def slot_status(self, short=False):
+    def slot_status(self):
         raise NotImplementedError("slot_status() not implemented for Scheduler '%s'." % self.name)
 
 
@@ -526,29 +538,37 @@ class Scheduler(threading.Thread):
     #
     def _try_allocation(self, cu):
 
+        cu['opaque_slot'] = None
+
         # needs to be locked as we try to acquire slots, but slots are freed 
-        # in a different thread...
+        # in a different thread.  But we keep the lock duration short...
         with self._lock :
 
             # schedule this unit, and receive an opaque handle that has meaning to
             # the LRMS, Scheduler and LaunchMethod.
             cu['opaque_slot'] = self._allocate_slot(cu['description']['cores'])
 
-            if cu['opaque_slot']:
-                # got an allocation, go off and launch the process
-                # FIXME: state update toward EXECUTING (or is that done in
-                # launcher?)
-                rpu.prof('schedule', msg="allocated", uid=cu['_id'], logger=self._log.warn)
-                self._log.info (self.slot_status(short=True))
-                cu_list = rpu.blowup (agent_config, cu, EXEC) 
-                for _cu in cu_list :
-                    rpu.prof('push', msg="towards execution", uid=_cu['_id'])
-                    self._execution_queue.put(_cu)
-                return True
 
-            else:
-                # otherwise signal that CU remains unhandled
-                return False
+        if not cu['opaque_slot']:
+            # signal the CU remains unhandled
+            return False
+
+        # got an allocation, go off and launch the process
+        # FIXME: state update toward EXECUTING (or is that done in
+        # launcher?)
+        rpu.prof('schedule', msg="allocated", uid=cu['_id'], logger=self._log.warn)
+        self._log.info (self.slot_status())
+
+        cu_list = rpu.blowup (self._config, cu, EXEC) 
+
+        for _cu in cu_list :
+            rpu.prof('push', msg="towards execution", uid=_cu['_id'])
+            UpdateWorker.update_unit(queue = self._update_queue, 
+                                     cu    = cu,
+                                     state = rp.EXECUTION_PENDING)
+            self._execution_queue.put(_cu)
+
+        return True
 
 
     # --------------------------------------------------------------------------
@@ -562,10 +582,11 @@ class Scheduler(threading.Thread):
         for cu in self._wait_queue[:]:
 
             if self._try_allocation(cu):
-                # yep, that worked - remove it from the wait queue
-                self._wait_queue.remove(cu)
+                # NOTE: this is final, remove it from the wait queue
+                with self._wait_queue_lock :
+                    self._wait_queue.remove(cu)
 
-        rpu.prof(self.slot_status (short=True))
+        rpu.prof(self.slot_status ())
         rpu.prof('reschedule done')
 
 
@@ -574,30 +595,30 @@ class Scheduler(threading.Thread):
     def unschedule(self, cus):
         # release (for whatever reason) all slots allocated to this CU
 
+        rpu.prof('unschedule')
+        rpu.prof(self.slot_status ())
+
+        slots_released = False
+
+        if not isinstance(cus, list):
+            cus = [cus]
+
         # needs to be locked as we try to release slots, but slots are acquired
         # in a different thread....
         with self._lock :
-
-            rpu.prof('unschedule')
-            rpu.prof(self.slot_status (short=True))
-
-            slots_released = False
-
-            if not isinstance(cus, list):
-                cus = [cus]
 
             for cu in cus:
                 if cu['opaque_slot']:
                     self._release_slot(cu['opaque_slot'])
                     slots_released = True
-                    self._log.info (self.slot_status(short=True))
+                    self._log.info (self.slot_status())
 
-            # notify the scheduling thread of released slots
-            if slots_released:
-                self._schedule_queue.put(COMMAND_RESCHEDULE)
+        # notify the scheduling thread of released slots
+        if slots_released:
+            self._schedule_queue.put([COMMAND_RESCHEDULE, None])
 
-            rpu.prof(self.slot_status (short=True))
-            rpu.prof('unschedule done - reschedule')
+        rpu.prof(self.slot_status ())
+        rpu.prof('unschedule done - reschedule')
 
 
     # --------------------------------------------------------------------------
@@ -612,53 +633,58 @@ class Scheduler(threading.Thread):
 
                 request = self._schedule_queue.get()
 
-                # shutdown signal
+                # shutdown signal?
                 if not request:
                     continue
 
                 # we either get a new scheduled CU, or get a trigger that cores were
                 # freed, and we can try to reschedule waiting CUs
-                if isinstance(request, basestring):
+                command = request[0]
+                data    = request[1]
 
-                    command = request
-                    if command == COMMAND_RESCHEDULE:
-                        self._reschedule()
 
-                    else:
-                        self._log.error("Unknown scheduler command: %s (ignored)", command)
+                if command == COMMAND_RESCHEDULE:
 
-                elif isinstance(request, list) and len(request) == 2 :
+                    self._reschedule()
 
-                    rtype = request[0]
-                    cu    = request[1]
 
-                    if rtype == COMMAND_SCHEDULE :
+                elif command == COMMAND_SCHEDULE:
 
-                        # we got a new unit to schedule.  Either we can place 
-                        # it straight away and move it to execution, or we have
-                        # to put it on the wait queue.
-                        rpu.prof('schedule', msg="unit received", uid=cu['_id'])
-                        if not self._try_allocation(cu):
-                            # No resources available, put in wait queue
+                    cu = data
+
+                    UpdateWorker.update_unit(queue = self._update_queue, 
+                                             cu    = cu,
+                                             state = rp.AGENT_SCHEDULING)
+
+                    # we got a new unit to schedule.  Either we can place 
+                    # it straight away and move it to execution, or we have
+                    # to put it on the wait queue.
+                    rpu.prof('schedule', msg="unit received", uid=cu['_id'])
+                    if not self._try_allocation(cu):
+                        # No resources available, put in wait queue
+                        with self._wait_queue_lock :
                             self._wait_queue.append(cu)
-                            rpu.prof('schedule', msg="allocation failed", uid=cu['_id'])
+                        rpu.prof('schedule', msg="allocation failed", uid=cu['_id'])
 
-                    elif rtype == COMMAND_UNSCHEDULE :
 
-                        # we got a finished unit, and can re-use its cores
-                        #
-                        # FIXME: we may want to handle this type of requests
-                        # with higher priority, so it might deserve a separate
-                        # queue.  Measure first though, then optimize...
-                        #
-                        # NOTE: unschedule() runs re-schedule, which probably
-                        # should be delayed until this bulk has been worked
-                        # on...
-                        rpu.prof('schedule', msg="unit deallocation", uid=cu['_id'])
-                        self.unschedule(cu)
+                elif command == COMMAND_UNSCHEDULE :
+
+                    cu = data
+
+                    # we got a finished unit, and can re-use its cores
+                    #
+                    # FIXME: we may want to handle this type of requests
+                    # with higher priority, so it might deserve a separate
+                    # queue.  Measure first though, then optimize...
+                    #
+                    # NOTE: unschedule() runs re-schedule, which probably
+                    # should be delayed until this bulk has been worked
+                    # on...
+                    rpu.prof('schedule', msg="unit deallocation", uid=cu['_id'])
+                    self.unschedule(cu)
 
                 else :
-                    raise ValueError ("cannot handle scheduler request '%s'", request)
+                    raise ValueError ("cannot handle scheduler command '%s'", command)
 
 
             except Exception as e:
@@ -672,12 +698,12 @@ class SchedulerContinuous(Scheduler):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, lrms, scheduler_queue,
+    def __init__(self, name, config, logger, lrms, scheduler_queue,
                  execution_queue, update_queue):
 
         self.slots = None
 
-        Scheduler.__init__(self, name, logger, lrms, scheduler_queue,
+        Scheduler.__init__(self, name, config, logger, lrms, scheduler_queue,
                 execution_queue, update_queue)
 
 
@@ -685,10 +711,10 @@ class SchedulerContinuous(Scheduler):
     #
     def _configure(self):
         if not self._lrms.node_list:
-            raise Exception("LRMS %s didn't _configure node_list." % self._lrms.name)
+            raise RuntimeError("LRMS %s didn't _configure node_list." % self._lrms.name)
 
         if not self._lrms.cores_per_node:
-            raise Exception("LRMS %s didn't _configure cores_per_node." % self._lrms.name)
+            raise RuntimeError("LRMS %s didn't _configure cores_per_node." % self._lrms.name)
 
         # Slots represents the internal process management structure.
         # The structure is as follows:
@@ -729,34 +755,21 @@ class SchedulerContinuous(Scheduler):
 
     # --------------------------------------------------------------------------
     #
-    def slot_status(self, short=False):
+    def slot_status(self):
         """Returns a multi-line string corresponding to slot status.
         """
 
-        if short:
-            slot_matrix = ""
-            for slot in self.slots:
-                slot_matrix += "|"
-                for core in slot['cores']:
-                    if core == FREE:
-                        slot_matrix += "-"
-                    else:
-                        slot_matrix += "+"
+        slot_matrix = ""
+        for slot in self.slots:
             slot_matrix += "|"
-            return {'timestamp' : rpu.timestamp(),
-                    'slotstate' : slot_matrix}
-
-        else:
-            slot_matrix = ""
-            for slot in self.slots:
-                slot_vector  = ""
-                for core in slot['cores']:
-                    if core == FREE:
-                        slot_vector += " - "
-                    else:
-                        slot_vector += " X "
-                slot_matrix += "%-24s: %s\n" % (slot['node'], slot_vector)
-            return slot_matrix
+            for core in slot['cores']:
+                if core == FREE:
+                    slot_matrix += "-"
+                else:
+                    slot_matrix += "+"
+        slot_matrix += "|"
+        return {'timestamp' : rpu.timestamp(),
+                'slotstate' : slot_matrix}
 
 
     # --------------------------------------------------------------------------
@@ -975,13 +988,13 @@ class SchedulerTorus(Scheduler):
 
 
     # --------------------------------------------------------------------------
-    def __init__(self, name, logger, lrms, scheduler_queue,
+    def __init__(self, name, config, logger, lrms, scheduler_queue,
                  execution_queue, update_queue):
 
         self.slots            = None
         self._cores_per_node  = None
 
-        Scheduler.__init__(self, name, logger, lrms, scheduler_queue,
+        Scheduler.__init__(self, name, config, logger, lrms, scheduler_queue,
                 execution_queue, update_queue)
 
 
@@ -989,7 +1002,7 @@ class SchedulerTorus(Scheduler):
     #
     def _configure(self):
         if not self._lrms.cores_per_node:
-            raise Exception("LRMS %s didn't _configure cores_per_node." % self._lrms.name)
+            raise RuntimeError("LRMS %s didn't _configure cores_per_node." % self._lrms.name)
 
         self._cores_per_node = self._lrms.cores_per_node
 
@@ -999,31 +1012,20 @@ class SchedulerTorus(Scheduler):
 
     # --------------------------------------------------------------------------
     #
-    def slot_status(self, short=False):
+    def slot_status(self):
         """Returns a multi-line string corresponding to slot status.
         """
-        # TODO: Both short and long currently only deal with full-node status
-        if short:
-            slot_matrix = ""
-            for slot in self._lrms.torus_block:
-                slot_matrix += "|"
-                if slot[self.TORUS_BLOCK_STATUS] == FREE:
-                    slot_matrix += "-" * self._lrms.cores_per_node
-                else:
-                    slot_matrix += "+" * self._lrms.cores_per_node
+
+        slot_matrix = ""
+        for slot in self._lrms.torus_block:
             slot_matrix += "|"
-            return {'timestamp': rpu.timestamp(),
-                    'slotstate': slot_matrix}
-        else:
-            slot_matrix = ""
-            for slot in self._lrms.torus_block:
-                slot_vector = ""
-                if slot[self.TORUS_BLOCK_STATUS] == FREE:
-                    slot_vector = " - " * self._lrms.cores_per_node
-                else:
-                    slot_vector = " X " * self._lrms.cores_per_node
-                slot_matrix += "%s: %s\n" % (slot[self.TORUS_BLOCK_NAME].ljust(24), slot_vector)
-            return slot_matrix
+            if slot[self.TORUS_BLOCK_STATUS] == FREE:
+                slot_matrix += "-" * self._lrms.cores_per_node
+            else:
+                slot_matrix += "+" * self._lrms.cores_per_node
+        slot_matrix += "|"
+        return {'timestamp': rpu.timestamp(),
+                'slotstate': slot_matrix}
 
 
     # --------------------------------------------------------------------------
@@ -1082,7 +1084,7 @@ class SchedulerTorus(Scheduler):
             if offset % num_nodes != 0:
                 msg = 'Sub-block needs to start at correct offset!'
                 self._log.exception(msg)
-                raise Exception(msg)
+                raise ValueError(msg)
                 # TODO: If we want to workaround this, the coordinates need to overflow
 
             not_free = False
@@ -1214,10 +1216,11 @@ class LaunchMethod(object):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        self.name      = name
-        self._log      = logger
+        self.name       = name
+        self._config    = config
+        self._log       = logger
         self._scheduler = scheduler
 
         self.launch_command = None
@@ -1225,7 +1228,7 @@ class LaunchMethod(object):
         # TODO: This doesn't make too much sense for LM's that use multiple
         #       commands, perhaps this needs to move to per LM __init__.
         if self.launch_command is None:
-            raise Exception("Launch command not found for LaunchMethod '%s'" % name)
+            raise RuntimeError("Launch command not found for LaunchMethod '%s'" % name)
 
         logger.info("Discovered launch command: '%s'.", self.launch_command)
 
@@ -1234,11 +1237,11 @@ class LaunchMethod(object):
     # This class-method creates the appropriate sub-class for the Launch Method.
     #
     @classmethod
-    def create(cls, name, scheduler, logger):
+    def create(cls, name, config, logger, scheduler):
 
         # Make sure that we are the base-class!
         if cls != LaunchMethod:
-            raise Exception("LaunchMethod factory only available to base class!")
+            raise TypeError("LaunchMethod factory only available to base class!")
 
         try:
             implementation = {
@@ -1256,7 +1259,7 @@ class LaunchMethod(object):
                 LAUNCH_METHOD_RUNJOB        : LaunchMethodRUNJOB,
                 LAUNCH_METHOD_SSH           : LaunchMethodSSH
             }[name]
-            return implementation(name, logger, scheduler)
+            return implementation(name, config, logger, scheduler)
 
         except KeyError:
             logger.exception("LaunchMethod '%s' unknown!" % name)
@@ -1326,9 +1329,9 @@ class LaunchMethodFORK(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1358,9 +1361,9 @@ class LaunchMethodMPIRUN(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1401,9 +1404,9 @@ class LaunchMethodSSH(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1459,9 +1462,9 @@ class LaunchMethodMPIEXEC(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1500,9 +1503,9 @@ class LaunchMethodAPRUN(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1536,9 +1539,9 @@ class LaunchMethodCCMRUN(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1571,9 +1574,9 @@ class LaunchMethodMPIRUNCCMRUN(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
         self.mpirun_command = self._which('mpirun')
 
@@ -1586,7 +1589,7 @@ class LaunchMethodMPIRUNCCMRUN(LaunchMethod):
 
         self.mpirun_command = self._which('mpirun')
         if not self.mpirun_command:
-            raise Exception("mpirun not found!")
+            raise RuntimeError("mpirun not found!")
 
 
     # --------------------------------------------------------------------------
@@ -1619,9 +1622,9 @@ class LaunchMethodRUNJOB(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1640,7 +1643,7 @@ class LaunchMethodRUNJOB(LaunchMethod):
             msg = "Num cores (%d) is not a multiple of %d!" % (
                 task_numcores, self._scheduler._lrms.cores_per_node)
             self._log.exception(msg)
-            raise Exception(msg)
+            raise ValueError(msg)
 
         # Runjob it is!
         runjob_command = self.launch_command
@@ -1683,9 +1686,9 @@ class LaunchMethodDPLACE(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1721,9 +1724,9 @@ class LaunchMethodMPIRUNRSH(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1761,9 +1764,9 @@ class LaunchMethodMPIRUNDPLACE(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
         self.mpirun_command = None
 
@@ -1804,9 +1807,9 @@ class LaunchMethodIBRUN(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1842,9 +1845,9 @@ class LaunchMethodPOE(LaunchMethod):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, scheduler):
+    def __init__(self, name, config, logger, scheduler):
 
-        LaunchMethod.__init__(self, name, logger, scheduler)
+        LaunchMethod.__init__(self, name, config, logger, scheduler)
 
 
     # --------------------------------------------------------------------------
@@ -1897,9 +1900,10 @@ class LRMS(object):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
         self.name            = name
+        self._config         = config
         self._log            = logger
         self.requested_cores = requested_cores
 
@@ -1916,7 +1920,7 @@ class LRMS(object):
         # For now assume that all nodes have equal amount of cores
         cores_avail = len(self.node_list) * self.cores_per_node
         if cores_avail < int(requested_cores):
-            raise Exception("Not enough cores available (%s) to satisfy allocation request (%s)." \
+            raise ValueError("Not enough cores available (%s) to satisfy allocation request (%s)." \
                             % (str(cores_avail), str(requested_cores)))
 
 
@@ -1925,7 +1929,7 @@ class LRMS(object):
     # This class-method creates the appropriate sub-class for the LRMS.
     #
     @classmethod
-    def create(cls, name, requested_cores, logger):
+    def create(cls, name, config, logger, requested_cores):
 
         # TODO: Core counts dont have to be the same number for all hosts.
 
@@ -1940,7 +1944,7 @@ class LRMS(object):
 
         # Make sure that we are the base-class!
         if cls != LRMS:
-            raise Exception("LRMS Factory only available to base class!")
+            raise TypeError("LRMS Factory only available to base class!")
 
         try:
             implementation = {
@@ -1953,9 +1957,10 @@ class LRMS(object):
                 LRMS_NAME_SLURM       : SLURMLRMS,
                 LRMS_NAME_TORQUE      : TORQUELRMS
             }[name]
-            return implementation(name, logger, requested_cores)
+            return implementation(name, config, logger, requested_cores)
+
         except KeyError:
-            raise Exception("LRMS type '%s' unknown!" % name)
+            raise RuntimeError("LRMS type '%s' unknown!" % name)
 
 
     # --------------------------------------------------------------------------
@@ -1969,9 +1974,9 @@ class LRMS(object):
 class CCMLRMS(LRMS):
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
     # --------------------------------------------------------------------------
     #
@@ -1988,8 +1993,8 @@ class CCMLRMS(LRMS):
 
         hostname = os.uname()[1]
         if not hostname in open(ccm_nodefile).read():
-            raise Exception("Using the most recent CCM nodefile (%s),"
-                            " but I (%s) am not in it!" % (ccm_nodefile, hostname))
+            raise RuntimeError("Using the most recent CCM nodefile (%s),"
+                               " but I (%s) am not in it!" % (ccm_nodefile, hostname))
 
         # Parse the CCM nodefile
         ccm_nodes = [line.strip() for line in open(ccm_nodefile)]
@@ -2014,9 +2019,9 @@ class TORQUELRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -2029,7 +2034,7 @@ class TORQUELRMS(LRMS):
         if torque_nodefile is None:
             msg = "$PBS_NODEFILE not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Parse PBS the nodefile
         torque_nodes = [line.strip() for line in open(torque_nodefile)]
@@ -2075,7 +2080,7 @@ class TORQUELRMS(LRMS):
       #     torque_nodes_length < torque_num_nodes * torque_cores_per_node:
       #     msg = "Number of entries in $PBS_NODEFILE (%s) does not match with $PBS_NUM_NODES*$PBS_NUM_PPN (%s*%s)" % \
       #           (torque_nodes_length, torque_num_nodes,  torque_cores_per_node)
-      #     raise Exception(msg)
+      #     raise RuntimeError(msg)
 
         # only unique node names
         torque_node_list_length = len(torque_node_list)
@@ -2099,9 +2104,9 @@ class PBSProLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -2114,7 +2119,7 @@ class PBSProLRMS(LRMS):
         if pbspro_nodefile is None:
             msg = "$PBS_NODEFILE not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         self._log.info("Found PBSPro $PBS_NODEFILE %s." % pbspro_nodefile)
 
@@ -2129,7 +2134,7 @@ class PBSProLRMS(LRMS):
         else:
             msg = "$NUM_PPN not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Number of Nodes allocated
         val = os.environ.get('NODE_COUNT')
@@ -2138,7 +2143,7 @@ class PBSProLRMS(LRMS):
         else:
             msg = "$NODE_COUNT not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Number of Parallel Environments
         val = os.environ.get('NUM_PES')
@@ -2147,7 +2152,7 @@ class PBSProLRMS(LRMS):
         else:
             msg = "$NUM_PES not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         pbspro_vnodes = self._parse_pbspro_vnodes()
 
@@ -2170,7 +2175,7 @@ class PBSProLRMS(LRMS):
         else:
             msg = "$PBS_JOBID not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Get the output of qstat -f for this job
         output = subprocess.check_output(["qstat", "-f", pbspro_jobid])
@@ -2245,9 +2250,9 @@ class SLURMLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -2258,7 +2263,7 @@ class SLURMLRMS(LRMS):
         if slurm_nodelist is None:
             msg = "$SLURM_NODELIST not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Parse SLURM nodefile environment variable
         slurm_nodes = hostlist.expand_hostlist(slurm_nodelist)
@@ -2269,7 +2274,7 @@ class SLURMLRMS(LRMS):
         if slurm_nprocs_str is None:
             msg = "$SLURM_NPROCS not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
         else:
             slurm_nprocs = int(slurm_nprocs_str)
 
@@ -2278,7 +2283,7 @@ class SLURMLRMS(LRMS):
         if slurm_nnodes_str is None:
             msg = "$SLURM_NNODES not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
         else:
             slurm_nnodes = int(slurm_nnodes_str)
 
@@ -2287,7 +2292,7 @@ class SLURMLRMS(LRMS):
         if slurm_cpus_on_node_str is None:
             msg = "$SLURM_CPUS_ON_NODE not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
         else:
             slurm_cpus_on_node = int(slurm_cpus_on_node_str)
 
@@ -2315,9 +2320,9 @@ class SGELRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -2328,7 +2333,7 @@ class SGELRMS(LRMS):
         if sge_hostfile is None:
             msg = "$PE_HOSTFILE not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # SGE core configuration might be different than what multiprocessing
         # announces
@@ -2357,9 +2362,9 @@ class LSFLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -2370,13 +2375,13 @@ class LSFLRMS(LRMS):
         if lsf_hostfile is None:
             msg = "$LSB_DJOB_HOSTFILE not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         lsb_mcpu_hosts = os.environ.get('LSB_MCPU_HOSTS')
         if lsb_mcpu_hosts is None:
             msg = "$LSB_MCPU_HOSTS not set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # parse LSF hostfile
         # format:
@@ -2544,14 +2549,14 @@ class LoadLevelerLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
         self.torus_block            = None
         self.loadl_bg_block         = None
         self.shape_table            = None
         self.torus_dimension_labels = None
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
     # --------------------------------------------------------------------------
     #
@@ -2564,7 +2569,7 @@ class LoadLevelerLRMS(LRMS):
         if loadl_hostfile is None and self.loadl_bg_block is None:
             msg = "Neither $LOADL_HOSTFILE or $LOADL_BG_BLOCK set!"
             self._log.error(msg)
-            raise Exception(msg)
+            raise RuntimeError(msg)
 
         # Determine the size of the pilot allocation
         if loadl_hostfile is not None:
@@ -2574,7 +2579,7 @@ class LoadLevelerLRMS(LRMS):
             if loadl_total_tasks_str is None:
                 msg = "$LOADL_TOTAL_TASKS not set!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             else:
                 loadl_total_tasks = int(loadl_total_tasks_str)
 
@@ -2602,7 +2607,7 @@ class LoadLevelerLRMS(LRMS):
           # if loadl_bg_size_str is None:
           #     msg = "$LOADL_BG_SIZE not set!"
           #     self._log.error(msg)
-          #     raise Exception(msg)
+          #     raise RuntimeError(msg)
           # else:
           #     loadl_bg_size = int(loadl_bg_size_str)
 
@@ -2610,7 +2615,7 @@ class LoadLevelerLRMS(LRMS):
             if loadl_job_name is None:
                 msg = "$LOADL_JOB_NAME not set!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
 
             # Get the board list and block shape from 'llq -l' output
             output = subprocess.check_output(["llq", "-l", loadl_job_name])
@@ -2629,22 +2634,22 @@ class LoadLevelerLRMS(LRMS):
             if not loadl_bg_board_list_str:
                 msg = "No board list found in llq output!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             self._log.debug("BG Node Board List: %s" % loadl_bg_board_list_str)
             if not loadl_bg_midplane_list_str:
                 msg = "No midplane list found in llq output!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             self._log.debug("BG Midplane List: %s" % loadl_bg_midplane_list_str)
             if not loadl_bg_block_shape_str:
                 msg = "No board shape found in llq output!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             self._log.debug("BG Shape Allocated: %s" % loadl_bg_block_shape_str)
             if not loadl_bg_block_size_str:
                 msg = "No board size found in llq output!"
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             loadl_bg_block_size = int(loadl_bg_block_size_str)
             self._log.debug("BG Size Allocated: %d" % loadl_bg_block_size)
 
@@ -2656,7 +2661,7 @@ class LoadLevelerLRMS(LRMS):
             except Exception as e:
                 msg = "Couldn't construct block: %s" % e.message
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             self._log.debug("Torus block constructed:")
             for e in self.torus_block:
                 self._log.debug("%s %s %s %s" %
@@ -2667,7 +2672,7 @@ class LoadLevelerLRMS(LRMS):
             except Exception as e:
                 msg = "Couldn't construct node list."
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             #self._log.debug("Node list constructed: %s" % loadl_node_list)
 
             # Construct sub-block table
@@ -2676,7 +2681,7 @@ class LoadLevelerLRMS(LRMS):
             except Exception as e:
                 msg = "Couldn't construct shape table: %s" % e.message
                 self._log.error(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
             self._log.debug("Shape table constructed: ")
             for (size, dim) in [(key, self.shape_table[key]) for key in sorted(self.shape_table)]:
                 self._log.debug("%s %s" % (size, [dim[key] for key in sorted(dim)]))
@@ -3006,7 +3011,7 @@ class LoadLevelerLRMS(LRMS):
         elif len(shape_str.split('x')) == 4:
             block_shape = self.BGQ_MIDPLANE_SHAPE
         else:
-            raise Exception('Invalid shape string: %s' % shape_str)
+            raise ValueError('Invalid shape string: %s' % shape_str)
 
         # Dict to store the results
         table = {}
@@ -3048,9 +3053,9 @@ class ForkLRMS(LRMS):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, requested_cores):
+    def __init__(self, name, config, logger, requested_cores):
 
-        LRMS.__init__(self, name, logger, requested_cores)
+        LRMS.__init__(self, name, config, logger, requested_cores)
 
 
     # --------------------------------------------------------------------------
@@ -3091,7 +3096,7 @@ class ExecWorker(COMPONENT_TYPE):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id):
@@ -3102,6 +3107,7 @@ class ExecWorker(COMPONENT_TYPE):
         self._terminate = COMPONENT_MODE.Event()
 
         self.name              = name
+        self._config           = config
         self._log              = logger
         self._agent            = agent
         self._lrms             = lrms
@@ -3124,14 +3130,14 @@ class ExecWorker(COMPONENT_TYPE):
     # This class-method creates the appropriate sub-class for the Launch Method.
     #
     @classmethod
-    def create(cls, name, spawner, logger, agent, lrms, scheduler,
+    def create(cls, name, config, logger, spawner, agent, lrms, scheduler,
                task_launcher, mpi_launcher, command_queue, 
                execution_queue, update_queue, schedule_queue, 
                stageout_queue, pilot_id, session_id):
 
         # Make sure that we are the base-class!
         if cls != ExecWorker:
-            raise Exception("ExecWorker Factory only available to base class!")
+            raise TypeError("ExecWorker Factory only available to base class!")
 
         try:
             implementation = {
@@ -3139,7 +3145,7 @@ class ExecWorker(COMPONENT_TYPE):
                 SPAWNER_NAME_SHELL : ExecWorker_SHELL
             }[spawner]
 
-            impl = implementation(name, logger, agent, lrms, scheduler,
+            impl = implementation(name, config, logger, agent, lrms, scheduler,
                                   task_launcher, mpi_launcher, command_queue, 
                                   execution_queue, stageout_queue, update_queue, 
                                   schedule_queue, pilot_id, session_id)
@@ -3147,7 +3153,7 @@ class ExecWorker(COMPONENT_TYPE):
             return impl
 
         except KeyError:
-            raise Exception("ExecWorker '%s' unknown!" % name)
+            raise ValueError("ExecWorker '%s' unknown!" % name)
 
 
     # --------------------------------------------------------------------------
@@ -3189,7 +3195,7 @@ class ExecWorker_POPEN (ExecWorker) :
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue, 
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id):
@@ -3202,7 +3208,7 @@ class ExecWorker_POPEN (ExecWorker) :
         self._cu_environment = self._populate_cu_environment()
 
 
-        ExecWorker.__init__ (self, name, logger, agent, lrms, scheduler,
+        ExecWorker.__init__ (self, name, config, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue, 
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id)
@@ -3283,11 +3289,11 @@ class ExecWorker_POPEN (ExecWorker) :
                         launcher = self._task_launcher
 
                     if not launcher:
-                        self._agent.update_unit(
-                                uid    = cu['_id'],
-                                state  = rp.FAILED,
-                                msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
-                                logger = self._log.error)
+                        UpdateWorker.update_unit(queue  = self._update_queue, 
+                                                 cu     = cu,
+                                                 state  = rp.FAILED,
+                                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
+                                                 logger = self._log.error)
 
                     self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
@@ -3312,10 +3318,11 @@ class ExecWorker_POPEN (ExecWorker) :
                     # Free the Slots, Flee the Flots, Ree the Frots!
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.FAILED,
-                                            msg    = "unit execution failed",
-                                            logger = self._log.exception)
+                    UpdateWorker.update_unit(queue  = self._update_queue, 
+                                             cu     = cu,
+                                             state  = rp.FAILED,
+                                             msg    = "unit execution failed: %s" % e,
+                                             logger = self._log.exception)
 
 
         except Exception as e:
@@ -3384,7 +3391,7 @@ class ExecWorker_POPEN (ExecWorker) :
             except Exception as e:
                 msg = "Error in spawner (%s)" % e
                 self._log.exception(msg)
-                raise Exception(msg)
+                raise RuntimeError(msg)
 
             launch_script.write('# The command to run\n%s\n' % launch_command)
 
@@ -3430,11 +3437,11 @@ class ExecWorker_POPEN (ExecWorker) :
         cu['proc']    = proc
 
         # register for state update and watching
-        self._agent.update_unit(uid    = cu['_id'],
-                                state  = rp.EXECUTING,
-                                msg    = "unit execution start")
+        UpdateWorker.update_unit(queue = self._update_queue, 
+                                 cu    = cu,
+                                 state = rp.EXECUTING)
 
-        cu_list = rpu.blowup (agent_config, cu, WATCH) 
+        cu_list = rpu.blowup (self._config, cu, WATCH) 
         for _cu in cu_list :
             rpu.prof('push', msg="toward watching", uid=_cu['_id'], tag='task_launching')
             self._watch_queue.put(_cu)
@@ -3459,8 +3466,8 @@ class ExecWorker_POPEN (ExecWorker) :
                     if command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
                         self._cus_to_cancel.append(command[COMMAND_ARG])
                     else:
-                        raise Exception("Command %s not applicable in this context." %
-                                        command[COMMAND_TYPE])
+                        raise RuntimeError("Command %s not applicable in this context." %
+                                           command[COMMAND_TYPE])
 
                 except Queue.Empty:
                     # do nothing if we don't have any queued commands
@@ -3495,7 +3502,7 @@ class ExecWorker_POPEN (ExecWorker) :
 
                 if not action and not cus :
                     # nothing happend at all!  Zzz for a bit.
-                    time.sleep(agent_config['queue_poll_sleeptime'])
+                    time.sleep(self._config['queue_poll_sleeptime'])
 
 
         except Exception as e:
@@ -3531,9 +3538,9 @@ class ExecWorker_POPEN (ExecWorker) :
                     self._cus_to_cancel.remove(cu['_id'])
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.CANCELED,
-                                            msg    = "unit execution canceled")
+                    UpdateWorker.update_unit(queue = self._update_queue, 
+                                             cu    = cu,
+                                             state = rp.CANCELED)
                     rpu.prof('final', msg="execcanceled", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
@@ -3553,9 +3560,9 @@ class ExecWorker_POPEN (ExecWorker) :
                 if exit_code != 0:
 
                     # The unit failed, no need to deal with its output data.
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.FAILED,
-                                            msg    = "unit execution failed")
+                    UpdateWorker.update_unit(queue = self._update_queue, 
+                                             cu    = cu,
+                                             state = rp.FAILED)
                     rpu.prof('final', msg="execfailed", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
@@ -3565,10 +3572,10 @@ class ExecWorker_POPEN (ExecWorker) :
                     # output data.  We always move to stageout, even if there are no
                     # directives -- at the very least, we'll upload stdout/stderr
 
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.STAGING_OUTPUT,
-                                            msg    = "unit execution completed")
-                    cu_list = rpu.blowup (agent_config, cu, STAGEOUT) 
+                    UpdateWorker.update_unit(queue = self._update_queue, 
+                                             cu    = cu,
+                                             state = rp.AGENT_STAGING_OUTPUT_PENDING)
+                    cu_list = rpu.blowup (self._config, cu, STAGEOUT) 
                     for _cu in cu_list :
                         rpu.prof('push', msg="toward stageout", uid=_cu['_id'], tag='watching')
                         self._stageout_queue.put(_cu)
@@ -3583,12 +3590,12 @@ class ExecWorker_SHELL(ExecWorker):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue, 
                  execution_queue, stageout_queue, update_queue,
                  schedule_queue, pilot_id, session_id):
 
-        ExecWorker.__init__ (self, name, logger, agent, lrms, scheduler,
+        ExecWorker.__init__ (self, name, config, logger, agent, lrms, scheduler,
                  task_launcher, mpi_launcher, command_queue, 
                  execution_queue, stageout_queue, update_queue,
                  schedule_queue, pilot_id, session_id)
@@ -3676,11 +3683,11 @@ class ExecWorker_SHELL(ExecWorker):
                         launcher = self._task_launcher
 
                     if not launcher:
-                        self._agent.update_unit(
-                                uid    = cu['_id'],
-                                state  = rp.FAILED,
-                                msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
-                                logger = self._log.error)
+                        UpdateWorker.update_unit(queue  = self._update_queue, 
+                                                 cu     = cu,
+                                                 state  = rp.FAILED,
+                                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
+                                                 logger = self._log.error)
 
                     self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
@@ -3704,10 +3711,10 @@ class ExecWorker_SHELL(ExecWorker):
 
                     # Free the Slots, Flee the Flots, Ree the Frots!
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.FAILED,
-                                            msg    = "unit execution failed",
-                                            logger = self._log.exception)
+                    UpdateWorker.update_unit(queue  = self._update_queue, 
+                                             cu     = cu,
+                                             state  = rp.FAILED,
+                                             logger = self._log.exception)
 
 
         except Exception as e:
@@ -3876,9 +3883,9 @@ class ExecWorker_SHELL(ExecWorker):
         with self._registry_lock :
             self._registry[pid] = cu
 
-        self._agent.update_unit(uid    = cu['_id'],
-                                state  = rp.EXECUTING,
-                                msg    = "unit execution started")
+        UpdateWorker.update_unit(queue = self._update_queue, 
+                                 cu    = cu,
+                                 state = rp.EXECUTING)
         # FIXME: add profiling
 
 
@@ -4011,18 +4018,18 @@ class ExecWorker_SHELL(ExecWorker):
         if rp_state in [rp.FAILED, rp.CANCELED] :
             # final state - no further state transition needed
             self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-            self._agent.update_unit(uid   = cu['_id'],
-                                    state = rp_state, 
-                                    msg   = "unit execution finished")
+            UpdateWorker.update_unit(queue = self._update_queue, 
+                                     cu    = cu,
+                                     state = rp_state)
 
         elif rp_state in [rp.DONE] :
             # advance the unit state
             self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-            self._agent.update_unit(uid   = cu['_id'],
-                                    state = rp.STAGING_OUTPUT,
-                                    msg   = "unit execution completed")
+            UpdateWorker.update_unit(queue = self._update_queue, 
+                                     cu    = cu,
+                                     state = rp.AGENT_STAGING_OUTPUT_PENDING)
 
-            cu_list = rpu.blowup (agent_config, cu, STAGEOUT) 
+            cu_list = rpu.blowup (self._config, cu, STAGEOUT) 
             for _cu in cu_list :
                 rpu.prof('push', msg="toward stageout", uid=_cu['_id'], tag='watching')
                 self._stageout_queue.put(_cu)
@@ -4041,12 +4048,13 @@ class StageinWorker(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, execution_queue, schedule_queue,
+    def __init__(self, name, config, logger, agent, execution_queue, schedule_queue,
                  stagein_queue, update_queue, workdir):
 
         threading.Thread.__init__(self)
 
         self.name             = name
+        self._config          = config
         self._log             = logger
         self._agent           = agent
         self._execution_queue = execution_queue
@@ -4080,18 +4088,16 @@ class StageinWorker(threading.Thread):
                 if not cu:
                     continue
 
+                UpdateWorker.update_unit(queue = self._update_queue, 
+                                         cu    = cu,
+                                         state = rp.AGENT_STAGING_INPUT)
+
                 sandbox      = os.path.join(self._workdir, '%s' % cu['_id'])
                 staging_area = os.path.join(self._workdir, agent_config_dict['staging_area'])
 
                 for directive in cu['Agent_Input_Directives']:
 
                     rpu.prof('Agent input_staging queue', uid=cu['_id'], msg=directive)
-
-                    if directive['state'] != rp.PENDING :
-                        # we ignore directives which need no action
-                        rpu.prof('Agent input_staging queue', uid=cu['_id'], msg='ignored')
-                        continue
-
 
                     # Perform input staging
                     self._log.info("unit input staging directives %s for cu: %s to %s",
@@ -4132,22 +4138,7 @@ class StageinWorker(threading.Thread):
                         log_message = "%s'ed %s to %s - success" % (directive['action'], source, abs_target)
                         self._log.info(log_message)
 
-                        # If all went fine, update the state of this
-                        # StagingDirective to DONE
-                        # FIXME: is this update below really *needed*?
-                        self._agent.update_unit(uid    = cu['_id'],
-                                                msg    = log_message,
-                                                query  = {
-                                                    'Agent_Input_Status'            : rp.EXECUTING,
-                                                    'Agent_Input_Directives.state'  : rp.PENDING,
-                                                    'Agent_Input_Directives.source' : directive['source'],
-                                                    'Agent_Input_Directives.target' : directive['target']
-                                                },
-                                                update = {
-                                                    '$set'
-                                                    : {'Agent_Input_Status'                    : rp.DONE,
-                                                              'Agent_Input_Directives.$.state' : rp.DONE}
-                                                })
+
                     except Exception as e:
 
                         # If we catch an exception, assume the staging failed
@@ -4156,28 +4147,19 @@ class StageinWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        self._agent.update_unit(uid    = cu['_id'],
-                                                state  = rp.FAILED,
-                                                msg    = log_message,
-                                                query  = {'Agent_Input_Status'             : rp.EXECUTING,
-                                                          'Agent_Input_Directives.state'   : rp.PENDING,
-                                                          'Agent_Input_Directives.source'  : directive['source'],
-                                                          'Agent_Input_Directives.target'  : directive['target']
-                                                         },
-                                                update = {'$set' : {'Agent_Input_Directives.$.state'  : rp.FAILED,
-                                                                    'Agent_Input_Status'              : rp.FAILED}
-                                                         })
+                        UpdateWorker.update_unit(queue = self._update_queue, 
+                                                 cu    = cu,
+                                                 state = rp.FAILED,
+                                                 msg   = log_message)
 
-                # agent staging is all done, unit can go to execution if it has
-                # no FTW staging
-                if not cu["FTW_Input_Directives"] :
-                    self._agent.update_unit_state(uid    = cu['_id'],
-                                                  state  = rp.ALLOCATING,
-                                                  msg    = 'agent input staging done')
-                    cu_list = blowup (cu, SCHEDULE) 
-                    for _cu in cu_list :
-                        rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
-                        self._schedule_queue.put(_cu)
+                # agent staging is all done, unit can go to execution
+                self._agent.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = rp.AGENT_SCHEDULING_PENDING)
+                cu_list = rpu.blowup (self._config, cu, SCHEDULE) 
+                for _cu in cu_list :
+                    rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='stagein')
+                    self._schedule_queue.put(_cu)
 
 
             except Exception as e:
@@ -4203,11 +4185,13 @@ class StageoutWorker(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, execution_queue, stageout_queue, update_queue, workdir):
+    def __init__(self, name, config, logger, agent, execution_queue, 
+                 stageout_queue, update_queue, workdir):
 
         threading.Thread.__init__(self)
 
         self.name             = name
+        self.config           = config
         self._log             = logger
         self._agent           = agent
         self._execution_queue = execution_queue
@@ -4242,6 +4226,10 @@ class StageoutWorker(threading.Thread):
 
                 if not cu:
                     continue
+
+                UpdateWorker.update_unit(queue = self._update_queue, 
+                                         cu    = cu,
+                                         state = rp.AGENT_STAGING_OUTPUT)
 
                 sandbox = os.path.join(self._workdir, '%s' % cu['_id'])
 
@@ -4311,20 +4299,7 @@ class StageoutWorker(threading.Thread):
                         log_message = "%s'ed %s to %s - success" %(directive['action'], abs_source, target)
                         self._log.info(log_message)
 
-                        # If all went fine, update the state of this
-                        # StagingDirective to DONE
-                        # FIXME: is this update below really *needed*?
-                        self._agent.update_unit(uid    = cu['_id'],
-                                                msg    = log_message,
-                                                query  = {
-                                                    'Agent_Output_Status'           : rp.EXECUTING,
-                                                    'Agent_Output_Directives.state' : rp.PENDING,
-                                                    'Agent_Output_Directives.source': directive['source'],
-                                                    'Agent_Output_Directives.target': directive['target']
-                                                },
-                                                update = {
-                                                    '$set' : {'Agent_Output_Directives.$.state': rp.DONE}
-                                                })
+
                     except Exception as e:
                         # If we catch an exception, assume the staging failed
                         log_message = "%s'ed %s to %s - failure (%s)" % \
@@ -4332,69 +4307,36 @@ class StageoutWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        self._agent.update_unit(uid    = cu['_id'],
-                                                state  = rp.FAILED,
-                                                msg    = log_message,
-                                                query  = {
-                                                    'Agent_Output_Status'            : rp.EXECUTING,
-                                                    'Agent_Output_Directives.state'  : rp.PENDING,
-                                                    'Agent_Output_Directives.source' : directive['source'],
-                                                    'Agent_Output_Directives.target' : directive['target']
-                                                },
-                                                update = {
-                                                    '$set' : {'Agent_Output_Directives.$.state' : rp.FAILED,
-                                                              'Agent_Output_Status'             : rp.FAILED}
-                                                })
+                        UpdateWorker.update_unit(queue = self._update_queue, 
+                                                 cu    = cu,
+                                                 state = rp.FAILED,
+                                                 msg   = log_message)
 
 
-                # local staging is done. Now check if there are Directives that
-                # need to be performed by the FTW.
-                # Obviously these are not executed here (by the Agent),
-                # but we need this code to set the state so that the FTW
-                # gets notified that it can start its work.
-                if cu['FTW_Output_Directives']:
+                if cu['UMGR_Output_Directives']:
+                    next_state = rp.UMGR_STAGING_OUTPUT_PENDING,
+                else :
+                    next_state = rp.DONE
 
-                    rpu.prof('ExecWorker unit needs FTW_O ', uid=cu['_id'])
-                    self._agent.update_unit(
-                        uid    = cu['_id'],
-                        msg    = 'FTW output staging needed',
-                        update = {
-                            '$set': {
-                                'FTW_Output_Status' : rp.PENDING,
-                                'stdout'            : cu['stdout'],
-                                'stderr'            : cu['stderr'],
-                                'exit_code'         : cu['exit_code'],
-                                'started'           : cu['started'],
-                                'finished'          : cu['finished'],
-                                'slots'             : cu['opaque_slot'],
-                            }
-                        })
-                    # NOTE: this is final for the agent scope -- further state
-                    # transitions are done by the FTW.
-                    cu = None
+                rpu.prof('final', msg="stageout done", uid=cu['_id'], tag='stageout')
+                UpdateWorker.update_unit(queue  = self._update_queue, 
+                                         cu     = cu,
+                                         state  = next_state,
+                                         update = {
+                                             '$set': {
+                                                 'stdout'    : cu['stdout'],
+                                                 'stderr'    : cu['stderr'],
+                                                 'exit_code' : cu['exit_code'],
+                                                 'started'   : cu['started'],
+                                                 'finished'  : cu['finished'],
+                                                 'slots'     : cu['opaque_slot'],
+                                             }
+                                         })
 
-                else:
-                    # no FTW staging is needed, local staging is done -- we can
-                    # move the unit into final state.
-                    rpu.prof('final', msg="stageout done", uid=cu['_id'], tag='stageout')
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.DONE,
-                                            msg    = 'output staging completed',
-                                            update = {
-                                                '$set' : {
-                                                    'stdout'    : cu['stdout'],
-                                                    'stderr'    : cu['stderr'],
-                                                    'exit_code' : cu['exit_code'],
-                                                    'started'   : cu['started'],
-                                                    'finished'  : cu['finished'],
-                                                    'slots'     : cu['opaque_slot'],
-                                                }
-                                            })
-                    # NOTE: this is final, the cu is not touched anymore
-                    cu = None
-
-                # make sure the CU is not touched anymore (see except below)
+                # NOTE: this is final for the agent scope -- further state
+                # transitions are done by the FTW.
                 cu = None
+
 
             except Exception as e:
                 self._log.exception("Error in StageoutWorker loop (%s)", e)
@@ -4405,21 +4347,23 @@ class StageoutWorker(threading.Thread):
                 # invalid state transitions...
                 if cu:
                     rpu.prof('final', msg="stageout failed", uid=cu['_id'], tag='stageout')
-                    self._agent.update_unit(uid    = cu['_id'],
-                                            state  = rp.FAILED,
-                                            msg    = 'output staging failed',
-                                            update = {
-                                                '$set' : {
-                                                    'stdout'    : cu['stdout'],
-                                                    'stderr'    : cu['stderr'],
-                                                    'exit_code' : cu['exit_code'],
-                                                    'started'   : cu['started'],
-                                                    'finished'  : cu['finished'],
-                                                    'slots'     : cu['opaque_slot'],
-                                                }
-                                            })
+                    UpdateWorker.update_unit(queue  = self._update_queue, 
+                                             cu     = cu,
+                                             state  = rp.FAILED,
+                                             update = {
+                                                 '$set' : {
+                                                     'stdout'    : cu['stdout'],
+                                                     'stderr'    : cu['stderr'],
+                                                     'exit_code' : cu['exit_code'],
+                                                     'started'   : cu['started'],
+                                                     'finished'  : cu['finished'],
+                                                     'slots'     : cu['opaque_slot'],
+                                                 }
+                                             })
                     # NOTE: this is final, the cu is not touched anymore
                     cu = None
+
+                # forward the exception
                 raise
 
 
@@ -4433,11 +4377,12 @@ class HeartbeatMonitor(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, agent, command_queue, p, pilot_id, starttime, runtime):
+    def __init__(self, name, config, logger, agent, command_queue, p, pilot_id, starttime, runtime):
 
         threading.Thread.__init__(self)
 
         self.name             = name
+        self._config          = config
         self._log             = logger
         self._agent           = agent
         self._command_queue   = command_queue
@@ -4470,7 +4415,7 @@ class HeartbeatMonitor(threading.Thread):
                 rpu.prof('heartbeat', msg='Listen! Listen! Listen to the heartbeat!')
                 self._check_commands()
                 self._check_state   ()
-                time.sleep(agent_config['heartbeat_interval'])
+                time.sleep(self._config['heartbeat_interval'])
 
             except Exception as e:
                 self._log.exception('error in heartbeat monitor (%s)', e)
@@ -4485,14 +4430,12 @@ class HeartbeatMonitor(threading.Thread):
         retdoc = self._p.find_and_modify(
                     query  = {"_id"  : self._pilot_id},
                     update = {"$set" : {COMMAND_FIELD: []}}, # Wipe content of array
-                    fields = [COMMAND_FIELD, 'state']
+                    fields = [COMMAND_FIELD]
                     )
 
         commands = list()
         if retdoc:
             commands = retdoc[COMMAND_FIELD]
-            state    = retdoc['state']
-
 
         for command in commands:
 
@@ -4501,11 +4444,6 @@ class HeartbeatMonitor(threading.Thread):
             if command[COMMAND_TYPE] == COMMAND_CANCEL_PILOT:
                 self.stop()
                 pilot_CANCELED(self._p, self._pilot_id, self._log, "CANCEL received. Terminating.")
-                sys.exit(1)
-
-            elif state == rp.CANCELING:
-                self.stop()
-                pilot_CANCELED(self._p, self._pilot_id, self._log, "CANCEL implied. Terminating.")
                 sys.exit(1)
 
             elif command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
@@ -4549,7 +4487,7 @@ class Agent(object):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, lrms_name, requested_cores,
+    def __init__(self, name, config, logger, lrms_name, requested_cores,
             task_launch_method, mpi_launch_method, spawner,
             scheduler_name, runtime,
             mongodb_url, mongodb_name, mongodb_auth,
@@ -4558,6 +4496,7 @@ class Agent(object):
         rpu.prof('Agent init')
 
         self.name                   = name
+        self._config                = config
         self._log                   = logger
         self._debug_helper          = ru.DebugHelper()
         self._pilot_id              = pilot_id
@@ -4585,11 +4524,13 @@ class Agent(object):
 
         self._lrms = LRMS.create(
                 name            = lrms_name,
+                config          = self._config,
                 logger          = self._log,
                 requested_cores = requested_cores)
 
         self._scheduler = Scheduler.create(
                 name            = scheduler_name,
+                config          = self._config,
                 logger          = self._log,
                 lrms            = self._lrms,
                 schedule_queue  = self._schedule_queue,
@@ -4599,17 +4540,20 @@ class Agent(object):
 
         self._task_launcher = LaunchMethod.create(
                 name            = task_launch_method,
+                config          = self._config,
                 logger          = self._log,
                 scheduler       = self._scheduler)
 
         self._mpi_launcher = LaunchMethod.create(
                 name            = mpi_launch_method,
+                config          = self._config,
                 logger          = self._log,
                 scheduler       = self._scheduler)
 
-        for n in range(agent_config['number_of_workers'][STAGEIN]):
+        for n in range(self._config['number_of_workers'][STAGEIN]):
             stagein_worker = StageinWorker(
                 name            = "StageinWorker-%d" % n,
+                config          = self._config,
                 logger          = self._log,
                 agent           = self,
                 execution_queue = self._execution_queue,
@@ -4621,9 +4565,10 @@ class Agent(object):
             self.worker_list.append(stagein_worker)
 
 
-        for n in range(agent_config['number_of_workers'][EXEC]):
+        for n in range(self._config['number_of_workers'][EXEC]):
             exec_worker = ExecWorker.create(
                 name            = "ExecWorker-%d" % n,
+                config          = self._config,
                 spawner         = spawner,
                 logger          = self._log,
                 agent           = self,
@@ -4642,9 +4587,10 @@ class Agent(object):
             self.worker_list.append(exec_worker)
 
 
-        for n in range(agent_config['number_of_workers'][STAGEOUT]):
+        for n in range(self._config['number_of_workers'][STAGEOUT]):
             stageout_worker = StageoutWorker(
                 name            = "StageoutWorker-%d" % n,
+                config          = self._config,
                 agent           = self,
                 logger          = self._log,
                 execution_queue = self._execution_queue,
@@ -4655,9 +4601,10 @@ class Agent(object):
             self.worker_list.append(stageout_worker)
 
 
-        for n in range(agent_config['number_of_workers'][UPDATE]):
-            update_worker = radical.pilot.update_worker.UpdateWorker(
+        for n in range(self._config['number_of_workers'][UPDATE]):
+            update_worker = UpdateWorker(
                 name            = "UpdateWorker-%d" % n,
+                config          = self._config,
                 agent           = self,
                 logger          = self._log,
                 session_id      = self._session_id,
@@ -4671,6 +4618,7 @@ class Agent(object):
 
         hbmon = HeartbeatMonitor(
                 name            = "HeartbeatMonitor",
+                config          = self._config,
                 logger          = self._log,
                 agent           = self,
                 command_queue   = self._command_queue,
@@ -4693,53 +4641,6 @@ class Agent(object):
 
         rpu.prof('Agent stop()')
         self._terminate.set()
-
-
-    # --------------------------------------------------------------------------
-    #
-    def update_unit(self, uid, state=None, msg=None, query=None, update=None,
-                    logger=None):
-
-        now = rpu.timestamp ()
-
-        if  logger and msg:
-            if state : logger("unit '%s' state change: %s" % (uid, msg))
-            else     : logger("unit '%s' update: %s"       % (uid, msg))
-
-        # use pseudo-deep copies
-        query_dict  = dict(query)  if query  else dict()
-        update_dict = dict(update) if update else dict()
-
-        query_dict['_id'] = uid
-
-        if state :
-            if not '$set'  in update_dict : update_dict['$set']  = dict()
-            if not '$push' in update_dict : update_dict['$push'] = dict()
-
-            # this assumes that 'state' and 'stathistory' are not yet in the
-            # updated dict -- otherwise they are overwritten...
-            update_dict['$set']['state'] = state
-            update_dict['$push']['statehistory'] = { 'state'     : state,
-                                                     'timestamp' : now}
-
-        if msg:
-            if not '$push' in update_dict : update_dict['$push'] = dict()
-
-            # this assumes that 'log' is not yet in the update_dict -- otherwise
-            # it will be overwritten...
-            update_dict['$push']['log'] = {'message'   : msg,
-                                           'timestamp' : rpu.timestamp()}
-
-        # we can artificially increase the load on the updater
-        query_list = rpu.blowup (agent_config, query_dict, UPDATE) 
-
-        for query_dict in query_list :
-            rpu.prof('push', msg="towards update (%s)" % state, uid=query_dict['_id'])
-            self._update_queue.put({'uid'    : query_dict['_id'],
-                                    'state'  : state,
-                                    'cbase'  : '.cu',
-                                    'query'  : query_dict,
-                                    'update' : update_dict})
 
 
     # --------------------------------------------------------------------------
@@ -4779,7 +4680,7 @@ class Agent(object):
                 # FIXME: use some mongodb notification mechanism to avoid busy
                 # polling.  Tailed cursors or whatever...
                 if not action:
-                    time.sleep(agent_config['db_poll_sleeptime'])
+                    time.sleep(self._config['db_poll_sleeptime'])
 
             except Exception as e:
                 # exception in the main loop is fatal
@@ -4827,49 +4728,22 @@ class Agent(object):
         # This also blocks us from using multiple ingest threads, or from doing
         # late binding by unit pull...
         cu_cursor  = self._cu.find(multi = True,
-                                   spec  = {"pilot" : self._pilot_id,
-                                            "state" : rp.PENDING_EXECUTION})
-
+                                   spec  = {"pilot"   : self._pilot_id,
+                                            "control" : "umgr",
+                                            "state"   : {"$in" : [rp.EXECUTION_PENDING,
+                                                                  rp.AGENT_STAGING_INPUT_PENDING]}})
         if cu_cursor.count():
+            # nothing to do whatsoever...
+            return 0
 
-            cu_list = list(cu_cursor)
-            cu_uids = [_cu['_id'] for _cu in cu_list]
+        cu_list = list(cu_cursor)
+        cu_uids = [_cu['_id'] for _cu in cu_list]
 
-            self._cu.update(
-                    multi    = True,
-                    spec     = {"_id"   : {"$in"    : cu_uids}},
-                    document = {"$set"  : {"state"  : rp.ALLOCATING},
-                                "$push" : {"statehistory":
-                                    {
-                                        "state"     : rp.ALLOCATING,
-                                        "timestamp" : rpu.timestamp()
-                                    }
-                               }})
-        else :
-            # if we did not find any units which can be executed immediately, we
-            # chack if we have any units for which to do stage-in
-            cu_cursor = self._cu.find(multi = True,
-                                      spec  = {"pilot" : self._pilot_id,
-                                               'Agent_Input_Status': rp.PENDING})
-            if cu_cursor.count():
+        self._cu.update(
+                multi    = True,
+                spec     = {"_id"   : {"$in"     : cu_uids}},
+                document = {"$set"  : {"control" : "agent"}})
 
-                cu_list = list(cu_cursor)
-                cu_uids = [_cu['_id'] for _cu in cu_list]
-
-                self._cu.update(
-                        multi    = True,
-                        spec     = {"_id"   : {"$in"    : cu_uids}},
-                        document = {"$set"  : {"state"  : rp.STAGING_INPUT,
-                                               "Agent_Input_Status": rp.EXECUTING},
-                                    "$push" : {"statehistory":
-                                        {
-                                            "state"     : rp.STAGING_INPUT,
-                                            "timestamp" : rpu.timestamp()
-                                        }
-                                   }})
-            else :
-                # no units whatsoever...
-                return 0
 
         # now we really own the CUs, and can start working on them (ie. push
         # them into the pipeline)
@@ -4878,71 +4752,53 @@ class Agent(object):
 
 
         # artificially increase load
-        cu_list = rpu.blowup (agent_config, cu_list, INGEST)
+        cu_list = rpu.blowup (self._config, cu_list, INGEST)
 
 
         for cu in cu_list:
 
-            try:
-                rpu.prof('Agent unit ingest', uid=cu['_id'], tag='cu arriving', logger=self._log.info)
+            
+            rpu.prof('Agent unit ingest', uid=cu['_id'], tag='cu arriving', logger=self._log.info)
 
-                cud     = cu['description']
-                workdir = "%s/%s" % (self._workdir, cu['_id'])
+            # --------------------------------------------------------------
+            # FIXME: the parts below need to go to stagein and/or execution
+            cud     = cu['description']
+            workdir = "%s/%s" % (self._workdir, cu['_id'])
 
-                cu['workdir']     = workdir
-                cu['stdout']      = ''
-                cu['stderr']      = ''
-                cu['opaque_clot'] = None
+            cu['workdir']     = workdir
+            cu['stdout']      = ''
+            cu['stderr']      = ''
 
-                stdout_file = cud.get('stdout')
-                if not stdout_file:
-                    stdout_file = 'STDOUT'
-                cu['stdout_file'] = os.path.join(workdir, stdout_file)
+            stdout_file = cud.get('stdout')
+            if not stdout_file:
+                stdout_file = 'STDOUT'
+            cu['stdout_file'] = os.path.join(workdir, stdout_file)
 
-                stderr_file = cud.get('stderr')
-                if not stderr_file:
-                    stderr_file = 'STDERR'
-                cu['stderr_file'] = os.path.join(workdir, stderr_file)
+            stderr_file = cud.get('stderr')
+            if not stderr_file:
+                stderr_file = 'STDERR'
+            cu['stderr_file'] = os.path.join(workdir, stderr_file)
 
+            rec_makedir(workdir)
+            # --------------------------------------------------------------
 
-                rpu.prof('Agent get unit meta', uid=cu['_id'])
-                # create unit sandbox
-                rec_makedir(workdir)
-                rpu.prof('Agent get unit mkdir', uid=cu['_id'])
+            # and send to staging / execution, respectively
+            if cu['state'] == rp.AGENT_STAGING_INPUT_PENDING :
+                for _cu in rpu.blowup (self._config, cu, STAGEIN):
+                    rpu.prof('push', msg="towards stagein", uid=_cu['_id'], tag='ingest')
+                    self._stagein_queue.put(_cu)
 
-                # and send to staging / execution, respectively
-                if cu['Agent_Input_Directives'] and \
-                   cu['Agent_Input_Status'] == rp.PENDING :
+            elif cu['state'] == rp.AGENT_SCHEDULING_PENDING:
+                for _cu in rpu.blowup (self._config, cu, SCHEDULE) :
+                    rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='ingest')
+                    self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
 
-                    self.update_unit(uid    = cu['_id'],
-                                     state  = rp.STAGING_INPUT,
-                                     msg    = 'unit needs input staging')
-                    cu_list = rpu.blowup (agent_config, cu, STAGEIN) 
-                    for _cu in cu_list :
-                        rpu.prof('push', msg="towards stagein", uid=_cu['_id'], tag='ingest')
-                        self._stagein_queue.put(_cu)
-
-                else:
-                    self.update_unit(uid    = cu['_id'],
-                                     state  = rp.ALLOCATING,
-                                     msg    = 'unit needs no input staging')
-                    cu_list = rpu.blowup (agent_config, cu, SCHEDULE) 
-                    for _cu in cu_list :
-                        rpu.prof('push', msg="towards scheduling", uid=_cu['_id'], tag='ingest')
-                        self._schedule_queue.put([COMMAND_SCHEDULE, _cu])
+            else:
+                raise ValueError ("invalid unit state on ingest (%s)" % cu['state'])
 
 
-            except Exception as e:
-                # if any unit sorting step failed, the unit did not end up in
-                # a queue (its always the last step).  We set it to FAILED
-                msg = "could not sort unit (%s)" % e
-                rpu.prof('error', msg=msg, tag="failed", uid=cu['_id'], logger=self._log.exception)
-                self.update_unit(uid    = cu['_id'],
-                                 state  = rp.FAILED,
-                                 msg    = msg)
-                # NOTE: this is final, the unit will not be touched
-                # anymore.
-                cu = None
+            # NOTE: this is final, the unit will not be touched anymore.
+            cu = None
 
 
         # indicate that we did some work (if we did...)
@@ -5055,6 +4911,7 @@ def main():
         rpu.prof('Agent create')
         agent = Agent(
                 name               = 'Agent',
+                config             = agent_config,
                 logger             = logger,
                 lrms_name          = options.lrms,
                 requested_cores    = options.cores,

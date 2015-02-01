@@ -11,23 +11,49 @@
 __copyright__ = "Copyright 2013-2014, http://radical.rutgers.edu"
 __license__ = "MIT"
 
-import os
 import time
-import weakref
 
 from radical.pilot.compute_unit import ComputeUnit
 from radical.pilot.utils.logger import logger
 
-from radical.pilot.controller   import UnitManagerController
-from radical.pilot.scheduler    import get_scheduler
+from radical.pilot.scheduler    import UMGR_Scheduler
+from radical.pilot.staging      import UMGR_Staging_Input
+from radical.pilot.staging      import UMGR_Staging_Output
 
 from radical.pilot.types        import *
 from radical.pilot.states       import *
 from radical.pilot.exceptions   import *
 
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 #
-class UnitManager(object):
+# UnitManager setup
+#
+UMGR_THREADS   = 'threading'
+UMGR_PROCESSES = 'multiprocessing'
+
+UMGR_MODE      = UMGR_THREADS
+
+if UMGR_MODE == UMGR_THREADS :
+    COMPONENT_MODE = threading
+    COMPONENT_TYPE = threading.Thread
+    QUEUE_TYPE     = multiprocessing.Queue
+elif UMGR_MODE == UMGR_PROCESSES :
+    COMPONENT_MODE = multiprocessing
+    COMPONENT_TYPE = multiprocessing.Process
+    QUEUE_TYPE     = multiprocessing.Queue
+
+# ------------------------------------------------------------------------------
+#
+# config flags 
+#
+# FIXME: move to some RP config
+#
+rp_config = dict()
+
+
+# =============================================================================
+#
+class UnitManager(COMPONENT_TYPE):
     """A UnitManager manages :class:`radical.pilot.ComputeUnit` instances which
     represent the **executable** workload in RADICAL-Pilot. A UnitManager connects
     the ComputeUnits with one or more :class:`Pilot` instances (which represent
@@ -70,8 +96,7 @@ class UnitManager(object):
 
     # -------------------------------------------------------------------------
     #
-    def __init__(self, session, scheduler=None, input_transfer_workers=2,
-                 output_transfer_workers=2, _reconnect=False):
+    def __init__(self, session, scheduler=None, uid=None):
         """Creates a new UnitManager and attaches it to the session.
 
         **Args:**
@@ -80,39 +105,52 @@ class UnitManager(object):
 
             * scheduler (`string`): The name of the scheduler plug-in to use.
 
-            * input_transfer_workers (`int`): The number of input file transfer 
+            * uid (`string`): If a UnitManager id is given, the backend is
+            * searched for an existing instance to reconnect to.
               worker processes to launch in the background. 
-
-            * output_transfer_workers (`int`): The number of output file transfer 
-              worker processes to launch in the background. 
-
-        .. note:: `input_transfer_workers` and `output_transfer_workers` can be
-                  used to tune RADICAL-Pilot's file transfer performance. 
-                  However, you should only change the default values if you 
-                  know what you are doing.
-
-        **Raises:**
-            * :class:`radical.pilot.PilotException`
         """
+
+        COMPONENT_TYPE.__init__(self)
+
         self._session = session
-        self._worker  = None 
-        self._pilots  = list()
+
+
+        if uid :
+            # FIXME: re-implement reconnect.  Basically need to dig out the
+            # pilot handles...
+            self.uid = uid
+
+        else :
+            self.uid = ru.generate_id('umgr.%(counter)02d', ru.ID_CUSTOM)
+
 
         # keep track of some changing metrics
         self.wait_queue_size = 0
 
-        if _reconnect is False:
-            # Start a worker process fo this UnitManager instance. The worker
-            # process encapsulates database access et al.
-            self._worker = UnitManagerController(
-                unit_manager_uid=None, 
-                scheduler=scheduler,
-                input_transfer_workers=input_transfer_workers,
-                output_transfer_workers=output_transfer_workers, 
-                session=self._session,
-                db_connection=session._dbs,
-                db_connection_info=session._connection_info)
-            self._worker.start()
+        # we want to own all queues -- that simplifies startup and shutdown
+        self._umgr_schedule_queue      = QUEUE_TYPE()
+        self._umgr_staging_input_queue = QUEUE_TYPE()
+        self._update_queue             = QUEUE_TYPE()
+
+        self.worker_list               = list()
+
+
+        # spawn the scheduler
+        for n in range(rp_config['number_of_workers'][UMGR_SCHEDULER]):
+            scheduler = UMGR_Scheduler.create (
+                name                      = "UMGR_Scheduler-%d" % n,
+                config                    = rp_config, 
+                logger                    = self._log,
+                session                   = self._session,
+                scheduler                 = scheduler, 
+                umgr_schedule_queue       = self._umgr_schedule_queue,
+                umgr_staging_input_queue  = self._umgr_staging_input_queue,
+              # agent_staging_input_queue = self._None,
+              # agent_scheduling_queue    = self._None,
+                update_queue              = self._update_queue)
+            self.worker_list.append(exec_worker)
+
+
 
             self._uid = self._worker.unit_manager_uid
             self._scheduler = get_scheduler(name=scheduler, 

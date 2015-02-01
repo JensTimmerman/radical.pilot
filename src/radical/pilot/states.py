@@ -1,93 +1,86 @@
-#pylint: disable=C0301, C0103, W0212
-
-"""
-.. module:: radical.pilot.states
-   :platform: Unix
-   :synopsis: State constants.
-
-.. moduleauthor:: Ole Weidner <ole.weidner@rutgers.edu>
-"""
 
 __copyright__ = "Copyright 2013-2014, http://radical.rutgers.edu"
-__license__ = "MIT"
+__license__   = "MIT"
 
 import datetime
 
 # -----------------------------------------------------------------------------
 # The state "struct" encapsulates a state and its timestamp.
 class State(object):
+
     __slots__ = ('state', 'timestamp')
 
     # ----------------------------------------
     #
     def __init__(self, state, timestamp):
-        """Le constructeur.
-        """
-        self.state = state
+
+        self.state     = state
         self.timestamp = timestamp
 
     # ----------------------------------------
     #
     def __eq__(self, other):
-        """Comparison operator for 'equal'. Compares 'State' as well 
-           as 'str' types.
+        """Compare 'State' as well as 'str' types.
         """
         if type(other) == str:
-            return self.state == other
+            return self.state.lower() == other.lower()
         else:
             return self.state == other.state
 
     # ----------------------------------------
     #
     def __ne__(self, other):
-        """Comparison operator for 'not equal'. Compares 'State' as well 
-           as 'str' types.
-        """
-        if type(other) == str:
-            return not self.__eq__(other)
-        else:
-            return not self.__eq__(other.state)
+        return not self.__eq__(other)
 
     # ----------------------------------------
     #
     def as_dict(self):
-        """Returns the state and its timestamp as a Python dictionary.
-        """
         return {"state": self.state, "timestamp": self.timestamp}
 
     # ----------------------------------------
     #
     def __str__(self):
-        """Returns the string representation of the state. The string 
-           representation is just the state as string without its timestamp.
+        """The string representation is just the state as string without its 
+           timestamp.
         """
         return self.state
 
-# -----------------------------------------------------------------------------
-# Common States
-NEW                         = 'New'
-DONE                        = 'Done'
-CANCELING                   = 'Canceling'
-CANCELED                    = 'Canceled'
-FAILED                      = 'Failed'
-PENDING                     = 'Pending'
 
 # -----------------------------------------------------------------------------
 # ComputePilot States
-PENDING_LAUNCH              = 'PendingLaunch'
-LAUNCHING                   = 'Launching'
-PENDING_ACTIVE              = 'PendingActive'
-ACTIVE                      = 'Active'
+UNKNOWN                      = 'Unknown'
+NEW                          = 'New'
+LAUNCHING_PENDING            = 'PendingLaunch'
+LAUNCHING                    = 'Launching'
+ACTIVE_PENDING               = 'PendingActive'
+ACTIVE                       = 'Active'
+DONE                         = 'Done'
+FAILED                       = 'Failed'
+CANCELED                     = 'Canceled'
+
 
 # -----------------------------------------------------------------------------
 # ComputeUnit States
-UNSCHEDULED                 = 'Unscheduled'
-PENDING_INPUT_STAGING       = 'PendingInputStaging'
-STAGING_INPUT               = 'StagingInput'
-PENDING_EXECUTION           = 'PendingExecution'
-SCHEDULING                  = 'Scheduling'
-ALLOCATING                  = 'Allocating'
-EXECUTING                   = 'Executing'
-PENDING_OUTPUT_STAGING      = 'PendingOutputStaging'
-STAGING_OUTPUT              = 'StagingOutput'
+UNKNOWN                      = 'Unknown'
+NEW                          = 'New'
+UMGR_SCHEDULING_PENDING      = 'UMGR_Scheduling_Pending'
+UMGR_SCHEDULING              = 'UMGR_Scheduling'
+UMGR_STAGING_INPUT_PENDING   = 'UMGR_Staging_Input_Pending'
+UMGR_STAGING_INPUT           = 'UMGR_Staging_Input'
+AGENT_STAGING_INPUT_PENDING  = 'Agent_Staging_Input_Pending'
+AGENT_STAGING_INPUT          = 'Agent_Staging_Input'
+AGENT_SCHEDULING_PENDING     = 'Agent_Scheduling_Pending'
+AGENT_SCHEDULING             = 'Agent_Scheduling'
+EXECUTION_PENDING            = 'Execution_Pending'
+EXECUTING                    = 'Executing'
+AGENT_STAGING_OUTPUT_PENDING = 'Agent_Staging_Output_Pending'
+AGENT_STAGING_OUTPUT         = 'Agent_Staging_Output'
+UMGR_STAGING_OUTPUT_PENDING  = 'UMGR_Staging_Output_Pending'
+UMGR_STAGING_OUTPUT          = 'UMGR_Staging_Output'
+DONE                         = 'Done'
+FAILED                       = 'Failed'
+CANCELED                     = 'Canceled'
+
+
+# -----------------------------------------------------------------------------
 
