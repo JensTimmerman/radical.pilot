@@ -123,6 +123,7 @@ class Session (saga.Session, Object):
         # before doing anything else, set up the debug helper for the lifetime
         # of the session.
         self._debug_helper = ru.DebugHelper ()
+        self._log          = logger
 
         # Dictionaries holding all manager objects created during the session.
         self._pilot_manager_objects = list()
@@ -146,7 +147,7 @@ class Session (saga.Session, Object):
         if  not self._database_url :
             raise PilotException ("no database URL (set RADICAL_PILOT_DBURL)")  
 
-        logger.info("using database url  %s" % self._database_url)
+        self._log.info("using database url  %s" % self._database_url)
 
         # if the database url contains a path element, we interpret that as
         # database name (without the leading slash)
@@ -155,9 +156,9 @@ class Session (saga.Session, Object):
             tmp_url.path[0]  == '/' and \
             len(tmp_url.path) >  1  :
             self._database_name = tmp_url.path[1:]
-            logger.info("using database path %s" % self._database_name)
+            self._log.info("using database path %s" % self._database_name)
         else :
-            logger.info("using database name %s" % self._database_name)
+            self._log.info("using database name %s" % self._database_name)
 
         # Loading all "default" resource configurations
         module_path   = os.path.dirname(os.path.abspath(__file__))
@@ -169,11 +170,11 @@ class Session (saga.Session, Object):
             try :
                 rcs = ResourceConfig.from_file(config_file)
             except Exception as e :
-                logger.error ("skip config file %s: %s" % (config_file, e))
+                self._log.error ("skip config file %s: %s" % (config_file, e))
                 continue
 
             for rc in rcs:
-                logger.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s" % rc)
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
         user_cfgs     = "%s/.radical/pilot/configs/*.json" % os.environ.get ('HOME')
@@ -184,11 +185,11 @@ class Session (saga.Session, Object):
             try :
                 rcs = ResourceConfig.from_file(config_file)
             except Exception as e :
-                logger.error ("skip config file %s: %s" % (config_file, e))
+                self._log.error ("skip config file %s: %s" % (config_file, e))
                 continue
 
             for rc in rcs:
-                logger.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s" % rc)
 
                 if  rc in self._resource_configs :
                     # config exists -- merge user config into it
@@ -224,10 +225,10 @@ class Session (saga.Session, Object):
                                       db_url  = self._database_url,
                                       db_name = database_name)
 
-                logger.info("New Session created%s." % str(self))
+                self._log.info("New Session created%s." % str(self))
 
             except Exception, ex:
-                logger.exception ('session create failed')
+                self._log.exception ('session create failed')
                 raise PilotException("Couldn't create new session (database URL '%s' incorrect?): %s" \
                                 % (self._database_url, ex))  
 
@@ -247,7 +248,7 @@ class Session (saga.Session, Object):
                 self._created   = session_info["created"]
                 self._connected = session_info["connected"]
 
-                logger.info("Reconnected to existing Session %s." % str(self))
+                self._log.info("Reconnected to existing Session %s." % str(self))
 
             except Exception, ex:
                 raise PilotException("Couldn't re-connect to session: %s" % ex)  
@@ -276,12 +277,12 @@ class Session (saga.Session, Object):
               or doesn't exist. 
         """
 
-        logger.debug("session %s closing" % (str(self._uid)))
+        self._log.debug("session %s closing" % (str(self._uid)))
 
         uid = self._uid
 
         if not self._uid:
-            logger.error("Session object already closed.")
+            self._log.error("Session object already closed.")
             return
 
         # we keep 'delete' for backward compatibility.  If it was set, and the
@@ -293,7 +294,7 @@ class Session (saga.Session, Object):
             if  cleanup == True and terminate == True :
                 cleanup   = delete
                 terminate = delete
-                logger.warning("'delete' flag on session is deprecated. " \
+                self._log.warning("'delete' flag on session is deprecated. " \
                                "Please use 'cleanup' and 'terminate' instead!")
 
         if  cleanup :
@@ -301,19 +302,19 @@ class Session (saga.Session, Object):
             terminate = True
 
         for pmgr in self._pilot_manager_objects:
-            logger.debug("session %s closes   pmgr   %s" % (str(self._uid), pmgr._uid))
+            self._log.debug("session %s closes   pmgr   %s" % (str(self._uid), pmgr._uid))
             pmgr.close (terminate=terminate)
-            logger.debug("session %s closed   pmgr   %s" % (str(self._uid), pmgr._uid))
+            self._log.debug("session %s closed   pmgr   %s" % (str(self._uid), pmgr._uid))
 
         for umgr in self._unit_manager_objects:
-            logger.debug("session %s closes   umgr   %s" % (str(self._uid), umgr._uid))
+            self._log.debug("session %s closes   umgr   %s" % (str(self._uid), umgr._uid))
             umgr.close()
-            logger.debug("session %s closed   umgr   %s" % (str(self._uid), umgr._uid))
+            self._log.debug("session %s closed   umgr   %s" % (str(self._uid), umgr._uid))
 
         if  cleanup :
             self._destroy_db_entry()
 
-        logger.debug("session %s closed" % (str(self._uid)))
+        self._log.debug("session %s closed" % (str(self._uid)))
 
 
     #---------------------------------------------------------------------------
@@ -380,7 +381,7 @@ class Session (saga.Session, Object):
         self._assert_obj_is_valid()
 
         self._dbs.delete()
-        logger.info("Deleted session %s from database." % self._uid)
+        self._log.info("Deleted session %s from database." % self._uid)
         self._uid = None
 
     #---------------------------------------------------------------------------
@@ -553,7 +554,7 @@ class Session (saga.Session, Object):
             rcs = ResourceConfig.from_file(resource_config)
 
             for rc in rcs:
-                logger.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s" % rc)
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
         else :
@@ -566,7 +567,7 @@ class Session (saga.Session, Object):
         """
 
         if  resource_key in self._resource_aliases :
-            logger.warning ("using alias '%s' for deprecated resource key '%s'" \
+            self._log.warning ("using alias '%s' for deprecated resource key '%s'" \
                          % (self._resource_aliases[resource_key], resource_key))
             resource_key = self._resource_aliases[resource_key]
 

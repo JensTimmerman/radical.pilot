@@ -7,8 +7,8 @@ import Queue
 import time
 
 import radical.utils       as ru
-import radical.pilot       as rp
-import radical.pilot.utils as rpu
+
+from   radical.pilot.utils import get_mongodb, prof, blowup, timestamp
 
 
 # FIXME: into config
@@ -45,7 +45,7 @@ class UpdateWorker(threading.Thread):
         self._update_queue  = update_queue
         self._terminate     = threading.Event()
 
-        self._mongo_db      = rpu.get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
+        self._mongo_db      = get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
         self._cinfo         = dict()  # collection cache
 
         # run worker thread
@@ -80,9 +80,9 @@ class UpdateWorker(threading.Thread):
                     res  = cinfo['bulk'].execute()
                     self._log.debug("bulk update result: %s", res)
 
-                    rpu.prof('unit update bulk pushed (%d)' % len(cinfo['uids'].keys ()))
+                    prof('unit update bulk pushed (%d)' % len(cinfo['uids'].keys ()))
                     for uid in cinfo['uids']:
-                        rpu.prof('unit update pushed (%s)' % cinfo['uids'][uid], uid=uid)
+                        prof('unit update pushed (%s)' % cinfo['uids'][uid], uid=uid)
 
                     cinfo['last'] = now
                     cinfo['bulk'] = None
@@ -119,7 +119,7 @@ class UpdateWorker(threading.Thread):
                 query_dict  = update_request.get('query', dict())
                 update_dict = update_request.get('update',dict())
 
-                rpu.prof('unit update pulled (%s)' % state, uid=uid)
+                prof('unit update pulled (%s)' % state, uid=uid)
 
                 cname = self._session_id + cbase
 
@@ -142,7 +142,7 @@ class UpdateWorker(threading.Thread):
                              .update(update_dict)
 
                 timed_bulk_execute(cinfo)
-              # rpu.prof('unit update bulked', uid=uid)
+              # prof('unit update bulked', uid=uid)
 
             except Exception as e:
                 self._log.exception("unit update failed (%s)", e)
@@ -156,7 +156,7 @@ class UpdateWorker(threading.Thread):
     def update_unit(queue, cu, state=None, msg=None, query=None, 
                     update=None, logger=None):
 
-        now = rpu.timestamp ()
+        now = timestamp ()
         uid = cu['_id']
 
         if  logger and msg:
@@ -185,13 +185,13 @@ class UpdateWorker(threading.Thread):
             # this assumes that 'log' is not yet in the update_dict -- otherwise
             # it will be overwritten...
             update_dict['$push']['log'] = {'message'   : msg,
-                                           'timestamp' : rpu.timestamp()}
+                                           'timestamp' : timestamp()}
 
         # we can artificially increase the load on the updater
-        query_list = rpu.blowup (agent_config, query_dict, UPDATE) 
+        query_list = blowup (agent_config, query_dict, UPDATE) 
 
         for query in query_list :
-            rpu.prof('push', msg="towards update (%s)" % state, uid=query['_id'])
+            prof('push', msg="towards update (%s)" % state, uid=query['_id'])
             update_queue.put({'uid'    : query['_id'],
                               'state'  : state,
                               'cbase'  : '.cu',

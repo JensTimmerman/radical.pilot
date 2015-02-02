@@ -300,7 +300,7 @@ TRANSFER = 'Transfer' # saga remote transfer
 FREE     = 'Free'
 BUSY     = 'Busy'
 
-agent_config_dict = {
+agent_config = {
     # directory for staging files inside the agent sandbox
     'staging_area'         : 'staging_area',
     
@@ -319,7 +319,6 @@ agent_config_dict = {
     # time between checks of internal state and commands from mothership (seconds)
     'heartbeat_interval'   : 10,
 }
-agent_config = agent_config_dict
 agent_config['blowup_factor']     = BLOWUP_FACTOR
 agent_config['drop_clones']       = DROP_CLONES
 agent_config['number_of_workers'] = NUMBER_OF_WORKERS
@@ -4093,7 +4092,7 @@ class StageinWorker(threading.Thread):
                                          state = rp.AGENT_STAGING_INPUT)
 
                 sandbox      = os.path.join(self._workdir, '%s' % cu['_id'])
-                staging_area = os.path.join(self._workdir, agent_config_dict['staging_area'])
+                staging_area = os.path.join(self._workdir, agent_config['staging_area'])
 
                 for directive in cu['Agent_Input_Directives']:
 
@@ -4215,7 +4214,7 @@ class StageoutWorker(threading.Thread):
 
         self._log.info("started %s.", self)
 
-        staging_area = os.path.join(self._workdir, agent_config_dict['staging_area'])
+        staging_area = os.path.join(self._workdir, agent_config['staging_area'])
 
         while not self._terminate.is_set():
 

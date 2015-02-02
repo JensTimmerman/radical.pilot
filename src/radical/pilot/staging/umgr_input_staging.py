@@ -11,7 +11,7 @@ import multiprocessing
 import saga
 import saga.filesystem as sfs
 
-import radical.pilot   as rp
+from   radical.pilot.states             import *
 from   radical.pilot.update_worker      import UpdateWorker
 from   radical.pilot.staging_directives import CREATE_PARENTS
 
@@ -109,7 +109,7 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
 
                 UpdateWorker.update_unit(queue = self._update_queue, 
                                          cu    = cu,
-                                         state = rp.UMGR_STAGING_INPUT)
+                                         state = UMGR_STAGING_INPUT)
 
               # cu_list = rpu.blowup(cu, UMGR_STAGING_INPUT) 
 
@@ -120,12 +120,12 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
                         # agent staging is needed
                         UpdateWorker.update_unit(queue = self._update_queue, 
                                                  cu    = cu,
-                                                 state = rp.AGENT_STAGING_INPUT_PENDING)
+                                                 state = AGENT_STAGING_INPUT_PENDING)
                     else:
                         # no agent input staging needed -- schedule for execution
                         UpdateWorker.update_unit(queue = self._update_queue, 
                                                  cu    = cu,
-                                                 state = rp.AGENT_SCHEDULING_PENDING)
+                                                 state = AGENT_SCHEDULING_PENDING)
 
                 except Exception as e:
 
@@ -136,7 +136,7 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
                     # If a staging directive fails, fail the CU also.
                     UpdateWorker.update_unit(queue = self._update_queue, 
                                              cu    = cu,
-                                             state = rp.FAILED,
+                                             state = FAILED,
                                              msg   = msg)
 
             except Exception as e:

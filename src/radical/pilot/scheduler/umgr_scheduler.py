@@ -6,8 +6,8 @@ __license__   = "MIT"
 import threading
 import multiprocessing
 
-import radical.pilot       as rp
-import radical.pilot.utils as rpu
+from radical.pilot.states import *
+from radical.pilot.utils  import prof, blowup
 
 from radical.pilot.update_worker import UpdateWorker
 
@@ -165,21 +165,29 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
     # --------------------------------------------------------------------------
     #
-    def _add_pilot(self, pilot):
+    def add_pilot(self, pilots):
+
+        if not isinstance (pilots, list) :
+            pilots = [pilots]
 
         with self._pilot_list_lock :
-            self._pilot_list.append (pilot)
+            self._pilot_list += pilots
 
             # try to schedule waiting units to the new pilot
-            self._umgr_schedule_queue.put(COMMAND_RESCHEDULE)
+            self._umgr_schedule_queue.put([COMMAND_RESCHEDULE, None])
 
 
     # --------------------------------------------------------------------------
     #
-    def _remove_pilot(self, pilot):
+    def remove_pilot(self, pilot):
+
+        if not isinstance (pilots, list) :
+            pilots = [pilots]
 
         with self._pilot_list_lock :
-            self._pilot_list.remove (pilot)
+
+            for pilot in pilots :
+                self._pilot_list.remove (pilot)
 
             # schedulers which want to recover units from a removed pilot need
             # to overload this method -- otherwise the expectation is that the
@@ -201,31 +209,62 @@ class UMGR_Scheduler(COMPONENT_TYPE):
             return False
 
 
+        # the unit is scheduled -- prep it up for the target resource
+        # FIXME
+        # unit.sandbox = schedule['pilots'][pid]['sandbox'] + "/" + str(unit.uid)
+
+        # ud = unit.description
+
+        # if  'kernel' in ud and ud['kernel'] :
+
+        #     try :
+        #         from radical.ensemblemd.mdkernels import MDTaskDescription
+        #     except Exception as ex :
+        #         logger.error ("Kernels are not supported in" \
+        #               "compute unit descriptions -- install " \
+        #               "radical.ensemblemd.mdkernels!")
+        #         # FIXME: unit needs a '_set_state() method or something!
+        #         self._session._dbs.set_compute_unit_state (unit._uid, FAILED, 
+        #                 ["kernel expansion failed"])
+        #         continue
+
+        #     pilot_resource = schedule['pilots'][pid]['resource']
+
+        #     mdtd           = MDTaskDescription ()
+        #     mdtd.kernel    = ud.kernel
+        #     mdtd_bound     = mdtd.bind (resource=pilot_resource)
+        #     ud.environment = mdtd_bound.environment
+        #     ud.pre_exec    = mdtd_bound.pre_exec
+        #     ud.executable  = mdtd_bound.executable
+        #     ud.mpi         = mdtd_bound.mpi
+
+
+
         # got an allocation, go off and advance the process
-        rpu.prof('umgr schedule', msg="scheduled (%s)" % cu['target_pilot'], 
+        prof('umgr schedule', msg="scheduled (%s)" % cu['target_pilot'], 
                  uid=cu['_id'], logger=self._log.info)
 
-        cu_list = rpu.blowup (self._config, cu, UMGR_SCHEDULER)
+        cu_list = blowup (self._config, cu, UMGR_SCHEDULER)
 
         for _cu in cu_list :
 
             if cu['UMGR_Staging_Input_Directives'] :
-                rpu.prof('push', msg="towards umgr staging input", uid=_cu['_id'])
+                prof('push', msg="towards umgr staging input", uid=_cu['_id'])
                 UpdateWorker.update_unit(queue = self._update_queue, 
                                          cu    = cu,
-                                         state = rp.UMGR_STAGING_INPUT_PENDING)
+                                         state = UMGR_STAGING_INPUT_PENDING)
                 self._umgr_staging_input_queue.put(_cu)
 
             elif cu['Agent_Staging_Input_Directives'] :
-                rpu.prof('push', msg="towards agent staging input", uid=_cu['_id'])
+                prof('push', msg="towards agent staging input", uid=_cu['_id'])
                 UpdateWorker.update_unit(queue = self._update_queue, 
                                          cu    = cu,
-                                         state = rp.AGENT_STAGING_INPUT_PENDING)
+                                         state = AGENT_STAGING_INPUT_PENDING)
             else :
-                rpu.prof('push', msg="towards agent scheduling", uid=_cu['_id'])
+                prof('push', msg="towards agent scheduling", uid=_cu['_id'])
                 UpdateWorker.update_unit(queue = self._update_queue, 
                                          cu    = cu,
-                                         state = rp.AGENT_SCHEDULING_PENDING)
+                                         state = AGENT_SCHEDULING_PENDING)
 
         return True
 
@@ -234,7 +273,7 @@ class UMGR_Scheduler(COMPONENT_TYPE):
     #
     def _reschedule(self):
 
-        rpu.prof('reschedule')
+        prof('reschedule')
         # cycle through wait queue, and see if we get anything running now.  We
         # cycle over a copy of the list, so that we can modify the list on the
         # fly
@@ -245,8 +284,8 @@ class UMGR_Scheduler(COMPONENT_TYPE):
                 with self._wait_queue_lock :
                     self._wait_queue.remove(cu)
 
-        rpu.prof(self.pilot_status())
-        rpu.prof('reschedule done')
+        prof(self.pilot_status())
+        prof('reschedule done')
 
 
     # --------------------------------------------------------------------------
@@ -254,8 +293,8 @@ class UMGR_Scheduler(COMPONENT_TYPE):
     def unschedule(self, cus):
         # release (for whatever reason) all pilots allocated to this CU
 
-        rpu.prof('unschedule')
-        rpu.prof(self.pilot_status())
+        prof('unschedule')
+        prof(self.pilot_status())
 
         pilots_released = False
 
@@ -274,10 +313,10 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
         # notify the scheduling thread of released pilots
         if pilots_released:
-            self._umgr_schedule_queue.put(COMMAND_RESCHEDULE)
+            self._umgr_schedule_queue.put([COMMAND_RESCHEDULE, None])
 
-        rpu.prof(self.pilot_status())
-        rpu.prof('unschedule done - reschedule')
+        prof(self.pilot_status())
+        prof('unschedule done - reschedule')
 
 
     # --------------------------------------------------------------------------
@@ -296,6 +335,8 @@ class UMGR_Scheduler(COMPONENT_TYPE):
                 if not request:
                     continue
 
+                self._log.info ("request: %s" % request)
+
                 # we either get a new scheduled CU, or get a trigger that cores were
                 # freed, and we can try to reschedule waiting CUs
                 command = request[0]
@@ -313,17 +354,17 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
                     UpdateWorker.update_unit(queue = self._update_queue, 
                                              cu    = cu,
-                                             state = rp.UMGR_SCHEDULING)
+                                             state = UMGR_SCHEDULING)
 
                     # we got a new unit to schedule.  Either we can place 
                     # it straight away and move it to execution, or we have
                     # to put it on the wait queue.
-                    rpu.prof('schedule', msg="unit received", uid=cu['_id'])
+                    prof('schedule', msg="unit received", uid=cu['_id'])
                     if not self._try_allocation(cu):
                         # No resources available, put in wait queue
                         with self._wait_queue_lock :
                             self._wait_queue.append(cu)
-                        rpu.prof('schedule', msg="allocation failed", uid=cu['_id'])
+                        prof('schedule', msg="allocation failed", uid=cu['_id'])
 
 
                 elif command == COMMAND_UNSCHEDULE :
@@ -342,7 +383,7 @@ class UMGR_Scheduler(COMPONENT_TYPE):
                     # NOTE: unschedule() runs re-schedule, which probably
                     # should be delayed until this bulk has been worked
                     # on...
-                    rpu.prof('schedule', msg="unit deallocation", uid=cu['_id'])
+                    prof('schedule', msg="unit deallocation", uid=cu['_id'])
                     self.unschedule(cu)
 
                 else :
@@ -364,10 +405,10 @@ class UMGR_Scheduler_Direct(UMGR_Scheduler):
 
     # -------------------------------------------------------------------------
     #
-    def __init__(self, name, logger, session, umgr_schedule_queue, 
+    def __init__(self, name, config, logger, session, umgr_schedule_queue, 
                  umgr_staging_input_queue, update_queue) :
 
-        UMGR_Scheduler.__init__(self, name, logger, session, 
+        UMGR_Scheduler.__init__(self, name, config, logger, session, 
                 umgr_schedule_queue, umgr_staging_input_queue, update_queue)
 
         self._pilot_stats = dict()

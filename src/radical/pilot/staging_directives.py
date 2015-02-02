@@ -39,6 +39,9 @@ def expand_staging_directive(staging_directive, logger):
 
     """
 
+    if not staging_directive :
+        return []
+
     # Convert single entries into a list
     if not isinstance(staging_directive, list):
         staging_directive = [staging_directive]

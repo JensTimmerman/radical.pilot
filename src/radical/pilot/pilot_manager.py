@@ -195,7 +195,7 @@ class PilotManager(Object):
                 wait_for_cancel = False
                 for pilot in all_pilots :
                     logger.debug("pmgr    %s wait for pilot  %s (%s)" % (str(self._uid), pilot._uid, pilot.state))
-                    if  pilot.state not in [DONE, FAILED, CANCELED, CANCELING] :
+                    if  pilot.state not in [DONE, FAILED, CANCELED] :
                         time.sleep (1)
                         wait_for_cancel = True
                         break

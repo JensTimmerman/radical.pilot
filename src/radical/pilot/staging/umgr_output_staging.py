@@ -10,7 +10,7 @@ import multiprocessing
 
 import saga.filesystem as sfs
 
-import radical.pilot   as rp
+from   radical.pilot.states             import *
 from   radical.pilot.update_worker      import UpdateWorker
 from   radical.pilot.staging_directives import CREATE_PARENTS
 
@@ -95,7 +95,7 @@ class UMGR_Staging_Output(COMPONENT_TYPE):
 
                 UpdateWorker.update_unit(queue = self._update_queue, 
                                          cu    = cu,
-                                         state = rp.UMGR_STAGING_OUTPUT)
+                                         state = UMGR_STAGING_OUTPUT)
 
               # cu_list = rpu.blowup(cu, UMGR_STAGING_OUTPUT) 
 
@@ -104,7 +104,7 @@ class UMGR_Staging_Output(COMPONENT_TYPE):
 
                     UpdateWorker.update_unit(queue = self._update_queue, 
                                              cu    = cu,
-                                             state = rp.DONE)
+                                             state = DONE)
 
                 except Exception as e:
 
@@ -115,7 +115,7 @@ class UMGR_Staging_Output(COMPONENT_TYPE):
                     # If a staging directive fails, fail the CU also.
                     UpdateWorker.update_unit(queue = self._update_queue, 
                                              cu    = cu,
-                                             state = rp.FAILED,
+                                             state = FAILED,
                                              msg   = msg)
 
             except Exception as e:

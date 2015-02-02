@@ -125,7 +125,7 @@ class PilotLauncherWorker(threading.Thread):
 
         pending_pilots = pilot_col.find(
             {"pilotmanager": self.pilot_manager_id,
-             "state"       : {"$in": [PENDING_ACTIVE, ACTIVE]}}
+             "state"       : {"$in": [ACTIVE_PENDING, ACTIVE]}}
         )
 
         for pending_pilot in pending_pilots:
@@ -294,7 +294,7 @@ class PilotLauncherWorker(threading.Thread):
                 ts = datetime.datetime.utcnow()
                 compute_pilot = pilot_col.find_and_modify(
                     query={"pilotmanager": self.pilot_manager_id,
-                           "state" : PENDING_LAUNCH},
+                           "state" : LAUNCHING_PENDING},
                     update={"$set" : {"state": LAUNCHING},
                             "$push": {"statehistory": {"state": LAUNCHING, "timestamp": ts}}}
                 )
@@ -653,14 +653,14 @@ class PilotLauncherWorker(threading.Thread):
                         for le in logentries :
                             log_dicts.append (le.as_dict())
 
-                        # Update the Pilot's state to 'PENDING_ACTIVE' if SAGA job submission was successful.
+                        # Update the Pilot's state to 'ACTIVE_PENDING' if SAGA job submission was successful.
                         ts = datetime.datetime.utcnow()
                         ret = pilot_col.update(
                             {"_id"  : pilot_id,
                              "state": 'Launching'},
-                            {"$set" : {"state": PENDING_ACTIVE,
+                            {"$set" : {"state": ACTIVE_PENDING,
                                       "saga_job_id": saga_job_id},
-                             "$push": {"statehistory": {"state": PENDING_ACTIVE, "timestamp": ts}},
+                             "$push": {"statehistory": {"state": ACTIVE_PENDING, "timestamp": ts}},
                              "$pushAll": {"log": log_dicts}
                             }
                         )
@@ -673,7 +673,7 @@ class PilotLauncherWorker(threading.Thread):
                             ret = pilot_col.update(
                                 {"_id"  : pilot_id},
                                 {"$set" : {"saga_job_id": saga_job_id},
-                                 "$push": {"statehistory": {"state": PENDING_ACTIVE, "timestamp": ts}},
+                                 "$push": {"statehistory": {"state": ACTIVE_PENDING, "timestamp": ts}},
                                  "$pushAll": {"log": log_dicts}}
                             )
 

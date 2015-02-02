@@ -39,7 +39,7 @@ class PilotManagerController(threading.Thread):
 
     # ------------------------------------------------------------------------
     #
-    def __init__(self, pilot_manager_uid, pilot_manager_data, 
+    def __init__(self, pilot_manager_uid, pilot_manager_data,
         session, db_connection, db_connection_info, pilot_launcher_workers=1):
         """Le constructeur.
         """
@@ -76,11 +76,11 @@ class PilotManagerController(threading.Thread):
         #  }
         #  self._shared_worker_data = {
         #      'job_services':  {url: saga.job.Service}    # dict of job services
-        #      'job_ids'     :  {pilot_id : (job_id, url)} # dict of pilot job handles 
+        #      'job_ids'     :  {pilot_id : (job_id, url)} # dict of pilot job handles
         #  }
         #
         self._shared_data = dict()
-        self._shared_worker_data = {'job_services' : dict(), 
+        self._shared_worker_data = {'job_services' : dict(),
                                     'job_ids'      : dict()}
 
         # The manager-level callbacks.
@@ -108,7 +108,7 @@ class PilotManagerController(threading.Thread):
         for worker_number in range(1, self._num_pilot_launcher_workers+1):
             worker = PilotLauncherWorker(
                 session=self._session,
-                db_connection_info=db_connection_info, 
+                db_connection_info=db_connection_info,
                 pilot_manager_id=self._pm_id,
                 shared_worker_data=self._shared_worker_data,
                 number=worker_number
@@ -214,7 +214,7 @@ class PilotManagerController(threading.Thread):
         if  not pilot_id in self._callback_histories :
             self._callback_histories[pilot_id] = list()
         self._callback_histories[pilot_id].append (
-                {'timestamp' : datetime.datetime.utcnow(), 
+                {'timestamp' : datetime.datetime.utcnow(),
                  'state'     : new_state})
 
         for [cb, cb_data] in self._shared_data[pilot_id]['callbacks']:
@@ -322,11 +322,12 @@ class PilotManagerController(threading.Thread):
                     # avoid state transitions into non-final states in the cache
                     # at all cost -- so we catch this here specifically
                     no_cb = False
-                    if  old_state == CANCELING :
+                  # if  old_state == CANCELING :
+                    if  old_state == CANCELED :
                         if  new_state not in [DONE, FAILED, CANCELED] :
                             # restore old state, making the cache explicitly
                             # different than the DB recorded state
-                            self._shared_data[pilot_id]["data"]["state"] = old_state 
+                            self._shared_data[pilot_id]["data"]["state"] = old_state
 
                             # do not tr igger a state cb!
                             no_cb = True
@@ -351,15 +352,23 @@ class PilotManagerController(threading.Thread):
                     if new_state in [FAILED, DONE, CANCELED]:
                         unit_ids = self._db.pilot_list_compute_units(pilot_uid=pilot_id)
                         self._db.set_compute_unit_state (
-                            unit_ids=unit_ids, 
+                            unit_ids=unit_ids,
                             state=CANCELED,
-                            src_states=[ PENDING_INPUT_STAGING,
-                                         STAGING_INPUT,
-                                         PENDING_EXECUTION,
-                                         SCHEDULING,
-                                         EXECUTING,
-                                         PENDING_OUTPUT_STAGING,
-                                         STAGING_OUTPUT
+                            src_states=[NEW,
+                                        UMGR_SCHEDULING_PENDING,
+                                        UMGR_SCHEDULING,
+                                        UMGR_STAGING_INPUT_PENDING,
+                                        UMGR_STAGING_INPUT,
+                                        AGENT_STAGING_INPUT_PENDING,
+                                        AGENT_STAGING_INPUT,
+                                        AGENT_SCHEDULING_PENDING,
+                                        AGENT_SCHEDULING,
+                                        EXECUTION_PENDING,
+                                        EXECUTING,
+                                        AGENT_STAGING_OUTPUT_PENDING,
+                                        AGENT_STAGING_OUTPUT,
+                                        UMGR_STAGING_OUTPUT_PENDING,
+                                        UMGR_STAGING_OUTPUT
                                        ],
                             log="Pilot '%s' has terminated with state '%s'. CU canceled." % (pilot_id, new_state))
 
@@ -441,7 +450,7 @@ class PilotManagerController(threading.Thread):
             pilot_uid=pilot_uid,
             pilot_manager_uid=self._pm_id,
             pilot_description=pilot.description,
-            pilot_sandbox=str(agent_dir_url), 
+            pilot_sandbox=str(agent_dir_url),
             global_sandbox=str(fs.path)
             )
 
@@ -516,12 +525,13 @@ class PilotManagerController(threading.Thread):
                 if  old_state in [DONE, FAILED, CANCELED] :
                     logger.warn ("can't actively cancel pilot %s: already in final state" % pilot_id)
 
-                elif old_state in [PENDING_LAUNCH, LAUNCHING, PENDING_ACTIVE] :
+                elif old_state in [LAUNCHING_PENDING, LAUNCHING, ACTIVE_PENDING] :
                     if pilot_id in self._shared_worker_data['job_ids'] :
 
                         try :
                             job_id, js_url = self._shared_worker_data['job_ids'][pilot_id]
-                            self._shared_data[pilot_id]["data"]["state"] = CANCELING
+                          # self._shared_data[pilot_id]["data"]["state"] = CANCELING
+                            self._shared_data[pilot_id]["data"]["state"] = CANCELED
                             logger.info ("actively cancel pilot %s (%s, %s)" % (pilot_id, job_id, js_url))
 
                             js = self._shared_worker_data['job_services'][js_url]

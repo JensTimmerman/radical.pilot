@@ -12,6 +12,10 @@ __copyright__ = "Copyright 2013-2014, http://radical.rutgers.edu"
 __license__ = "MIT"
 
 import time
+import threading
+import multiprocessing
+
+import radical.utils as ru
 
 from radical.pilot.compute_unit import ComputeUnit
 from radical.pilot.utils.logger import logger
@@ -42,6 +46,41 @@ elif UMGR_MODE == UMGR_PROCESSES :
     COMPONENT_TYPE = multiprocessing.Process
     QUEUE_TYPE     = multiprocessing.Queue
 
+# component IDs
+
+UMGR                = 'UMGR'
+UMGR_SCHEDULER      = 'UMGR_Scheduler'
+UMGR_STAGING_INPUT  = 'UMGR_Staging_Input'
+UMGR_STAGING_OUTPUT = 'UMGR_Staging_Output'
+
+# Number of worker threads
+NUMBER_OF_WORKERS = {
+        UMGR                :   1,
+        UMGR_SCHEDULER      :   1,
+        UMGR_STAGING_INPUT  :   1,
+        UMGR_STAGING_OUTPUT :   1
+}
+
+# factor by which the number of units are increased at a certain step.  Value of
+# '1' will leave the units unchanged.  Any blowup will leave on unit as the
+# original, and will then create clones with an changed unit ID (see blowup()).
+BLOWUP_FACTOR = {
+        UMGR                :   1,
+        UMGR_SCHEDULER      :   1,
+        UMGR_STAGING_INPUT  :   1,
+        UMGR_STAGING_OUTPUT :   1
+}
+
+# flag to drop all blown-up units at some point in the pipeline.  The units
+# with the original IDs will again be left untouched, but all other units are
+# silently discarded.
+DROP_CLONES = {
+        UMGR                : True,
+        UMGR_SCHEDULER      : True,
+        UMGR_STAGING_INPUT  : True,
+        UMGR_STAGING_OUTPUT : True
+}
+
 # ------------------------------------------------------------------------------
 #
 # config flags 
@@ -49,6 +88,9 @@ elif UMGR_MODE == UMGR_PROCESSES :
 # FIXME: move to some RP config
 #
 rp_config = dict()
+rp_config['blowup_factor']     = BLOWUP_FACTOR
+rp_config['drop_clones']       = DROP_CLONES
+rp_config['number_of_workers'] = NUMBER_OF_WORKERS
 
 
 # =============================================================================
@@ -113,31 +155,39 @@ class UnitManager(COMPONENT_TYPE):
         COMPONENT_TYPE.__init__(self)
 
         self._session = session
+        self._log     = session._log
 
 
         if uid :
             # FIXME: re-implement reconnect.  Basically need to dig out the
             # pilot handles...
-            self.uid = uid
+            self._uid = uid
 
         else :
-            self.uid = ru.generate_id('umgr.%(counter)02d', ru.ID_CUSTOM)
+            self._uid = ru.generate_id('umgr.%(counter)02d', ru.ID_CUSTOM)
 
+        # register with session for shutdown
+        # FIXME: should session be a factory after all?
+        self._session._unit_manager_objects.append(self)
 
-        # keep track of some changing metrics
+        # keep track of some stuff
         self.wait_queue_size = 0
+        self._unit_list      = list()
+        self._pilot_list     = list()
+        self._worker_list    = list()
+        self._scheduler_list = list()
 
         # we want to own all queues -- that simplifies startup and shutdown
-        self._umgr_schedule_queue      = QUEUE_TYPE()
-        self._umgr_staging_input_queue = QUEUE_TYPE()
-        self._update_queue             = QUEUE_TYPE()
+        self._umgr_schedule_queue       = QUEUE_TYPE()
+        self._umgr_staging_input_queue  = QUEUE_TYPE()
+        self._umgr_staging_output_queue = QUEUE_TYPE()
+        self._update_queue              = QUEUE_TYPE()
 
-        self.worker_list               = list()
 
 
-        # spawn the scheduler
+        # spawn the scheduler instances (usually 1)
         for n in range(rp_config['number_of_workers'][UMGR_SCHEDULER]):
-            scheduler = UMGR_Scheduler.create (
+            worker = UMGR_Scheduler.create (
                 name                      = "UMGR_Scheduler-%d" % n,
                 config                    = rp_config, 
                 logger                    = self._log,
@@ -148,24 +198,40 @@ class UnitManager(COMPONENT_TYPE):
               # agent_staging_input_queue = self._None,
               # agent_scheduling_queue    = self._None,
                 update_queue              = self._update_queue)
-            self.worker_list.append(exec_worker)
+            self._worker_list.append(worker)
+            self._scheduler_list.append(worker)
+
+        # spawn the input stager
+        for n in range(rp_config['number_of_workers'][UMGR_STAGING_INPUT]):
+            worker = UMGR_Staging_Input(
+                name                      = "UMGR_Staging_Input-%d" % n,
+                config                    = rp_config, 
+                logger                    = self._log,
+                session                   = self._session,
+                umgr_staging_input_queue  = self._umgr_staging_input_queue,
+              # agent_staging_input_queue = self._None,
+              # agent_scheduling_queue    = self._None,
+                update_queue              = self._update_queue)
+            self._worker_list.append(worker)
+
+        # spawn the output stager
+        for n in range(rp_config['number_of_workers'][UMGR_STAGING_OUTPUT]):
+            worker = UMGR_Staging_Output(
+                name                      = "UMGR_Staging_Output-%d" % n,
+                config                    = rp_config, 
+                logger                    = self._log,
+                session                   = self._session,
+                umgr_staging_output_queue = self._umgr_staging_output_queue,
+                update_queue              = self._update_queue)
+            self._worker_list.append(worker)
 
 
+        # FIXME: also spawn a separate thread/process to pull for state updates
+        # from mongodb, and to issue callbacks etc from there.  This will need
+        # to be replaced with some queue, eventually -- for now we pull :/
+        self.start ()
 
-            self._uid = self._worker.unit_manager_uid
-            self._scheduler = get_scheduler(name=scheduler, 
-                                            manager=self, 
-                                            session=self._session)
 
-            # Each unit manager has a worker thread associated with it.
-            # The task of the worker thread is to check and update the state
-            # of units, fire callbacks and so on.
-            self._session._unit_manager_objects.append(self)
-            self._session._process_registry.register(self._uid, self._worker)
-
-        else:
-            # re-connect. do nothing
-            pass
 
 
     #--------------------------------------------------------------------------
@@ -174,84 +240,84 @@ class UnitManager(COMPONENT_TYPE):
         """Shuts down the UnitManager and its background workers in a 
         coordinated fashion.
         """
-        if not self._uid:
-            logger.warning("UnitManager object already closed.")
-            return
 
-        if self._worker is not None:
-            self._worker.stop()
-            # Remove worker from registry
-            self._session._process_registry.remove(self._uid)
+        if not self._uid:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        for worker in self._worker_list:
+            worker.stop()
+
+        # also send a wakeup signals through all queues
+        self._umgr_schedule_queue     .put(None)
+        self._umgr_staging_input_queue.put(None)
+        self._update_queue            .put(None)
 
         logger.info("Closed UnitManager %s." % str(self._uid))
-        self._uid = None
+
 
     #--------------------------------------------------------------------------
     #
     @classmethod
     def _reconnect(cls, session, unit_manager_id):
-        """PRIVATE: Reconnect to an existing UnitManager.
+        """Reconnect to an existing UnitManager.
         """
-        uid_exists = UnitManagerController.uid_exists(
-            db_connection=session._dbs,
-            unit_manager_uid=unit_manager_id)
 
-        if not uid_exists:
-            raise BadParameter(
-                "UnitManager with id '%s' not in database." % unit_manager_id)
+        raise NotImplementedError ("not yet implemented again")
 
-        # The UnitManager object
-        obj = cls(session=session, scheduler=None, _reconnect=True)
+        # FIXME!
 
-        # Retrieve or start a worker process fo this PilotManager instance.
-        worker = session._process_registry.retrieve(unit_manager_id)
-        if worker is not None:
-            obj._worker = worker
-        else:
-            obj._worker = UnitManagerController(
-                unit_manager_uid=unit_manager_id,
-                session=session,
-                db_connection=session._dbs,
-                db_connection_info=session._connection_info)
-            session._process_registry.register(unit_manager_id, obj._worker)
+      # uid_exists = UnitManagerController.uid_exists(
+      #     db_connection=session._dbs,
+      #     unit_manager_uid=unit_manager_id)
+      #
+      # if not uid_exists:
+      #     raise BadParameter(
+      #         "UnitManager with id '%s' not in database." % unit_manager_id)
+      #
+      # # The UnitManager object
+      # obj = cls(session=session, scheduler=None, _reconnect=True)
+      #
+      # # Retrieve or start a worker process fo this PilotManager instance.
+      # worker = session._process_registry.retrieve(unit_manager_id)
+      # if worker is not None:
+      #     obj._worker = worker
+      # else:
+      #     obj._worker = UnitManagerController(
+      #         unit_manager_uid=unit_manager_id,
+      #         session=session,
+      #         db_connection=session._dbs,
+      #         db_connection_info=session._connection_info)
+      #     session._process_registry.register(unit_manager_id, obj._worker)
+      #
+      # # start the worker if it's not already running
+      # if obj._worker.is_alive() is False:
+      #     obj._worker.start()
+      #
+      # # Now that the worker is running (again), we can get more information
+      # # about the UnitManager
+      # um_data = obj._worker.get_unit_manager_data()
+      #
+      # obj._scheduler = get_scheduler(name=um_data['scheduler'], 
+      #                                manager=obj,
+      #                                session=obj._session)
+      # # FIXME: we need to tell the scheduler about all the pilots...
+      #
+      # obj._uid = unit_manager_id
+      #
+      # logger.info("Reconnected to existing UnitManager %s." % str(obj))
+      # return obj
 
-        # start the worker if it's not already running
-        if obj._worker.is_alive() is False:
-            obj._worker.start()
-
-        # Now that the worker is running (again), we can get more information
-        # about the UnitManager
-        um_data = obj._worker.get_unit_manager_data()
-
-        obj._scheduler = get_scheduler(name=um_data['scheduler'], 
-                                       manager=obj,
-                                       session=obj._session)
-        # FIXME: we need to tell the scheduler about all the pilots...
-
-        obj._uid = unit_manager_id
-
-        logger.info("Reconnected to existing UnitManager %s." % str(obj))
-        return obj
-
-    # -------------------------------------------------------------------------
-    #
-    def as_dict(self):
-        """Returns a Python dictionary representation of the UnitManager
-        object.
-        """
-        obj_dict = {
-            'uid':               self.uid,
-            'scheduler':         self.scheduler,
-            'scheduler_details': self.scheduler_details
-        }
-        return obj_dict
 
     # -------------------------------------------------------------------------
     #
     def __str__(self):
         """Returns a string representation of the UnitManager object.
         """
-        return str(self.as_dict())
+
+        if not self._uid:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        return self._uid
 
     #--------------------------------------------------------------------------
     #
@@ -259,29 +325,9 @@ class UnitManager(COMPONENT_TYPE):
     def uid(self):
         """Returns the unique id.
         """
+
         return self._uid
 
-    #--------------------------------------------------------------------------
-    #
-    @property
-    def scheduler(self):
-        """Returns the scheduler name.
-        """
-        if not self._uid:
-            raise IncorrectState(msg="Invalid object instance.")
-
-        return self._scheduler.name
-
-    #--------------------------------------------------------------------------
-    #
-    @property
-    def scheduler_details(self):
-        """Returns the scheduler logs.
-        """
-        if not self._uid:
-            raise IncorrectState(msg="Invalid object instance.")
-
-        return "NO SCHEDULER DETAILS (Not Implemented)"
 
     # -------------------------------------------------------------------------
     #
@@ -293,32 +339,20 @@ class UnitManager(COMPONENT_TYPE):
             * **pilots** [:class:`radical.pilot.ComputePilot` or list of
               :class:`radical.pilot.ComputePilot`]: The pilot objects that will be
               added to the unit manager.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
         if not isinstance(pilots, list):
             pilots = [pilots]
 
-        pilot_ids = self.list_pilots()
+        # TODO: publish pilot IDs in DB
 
-        for pilot in pilots :
-            if  pilot.uid in pilot_ids :
-                logger.warning ('adding the same pilot twice (%s)' % pilot.uid)
+        for scheduler in self._scheduler_list :
+            scheduler.add_pilot (pilots)
 
-        self._worker.add_pilots(pilots)
-
-        # let the scheduler know...
-        for pilot in pilots :
-            self._scheduler.pilot_added (pilot)
-
-        # also keep the instances around
-        for pilot in pilots :
-            self._pilots.append (pilot)
+        self._pilot_list += pilots
 
 
     # -------------------------------------------------------------------------
@@ -330,15 +364,12 @@ class UnitManager(COMPONENT_TYPE):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputePilot` UIDs [`string`].
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
-        return self._worker.get_pilot_uids()
+        return [pilot['_id'] for pilot in self._pilot_list]
 
 
     # -------------------------------------------------------------------------
@@ -350,15 +381,12 @@ class UnitManager(COMPONENT_TYPE):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputePilot` instances.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
-        return self._pilots
+        return self._pilot_list
 
     # -------------------------------------------------------------------------
     #
@@ -377,19 +405,23 @@ class UnitManager(COMPONENT_TYPE):
               which are managed by the removed pilot(s). If `True`, all units
               currently assigned to the pilot are allowed to finish execution.
               If `False` (the default), then `ACTIVE` units will be canceled.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
         if not isinstance(pilot_ids, list):
             pilot_ids = [pilot_ids]
 
-        self._worker.remove_pilots(pilot_ids)
+        for scheduler in self._scheduler_list :
+            scheduler.remove_pilots(pilot_ids)
 
+        for pilot_id in pilot_ids :
+            for pilot in self._pilot_list[:] :
+                if  pilot_id == pilot.uid :
+                    self._pilot_list.remove (pilot)
+
+        # TODO: update DB
 
         # FIXME:
         # if a pilot gets removed, we need to re-assign all its units to other
@@ -400,15 +432,6 @@ class UnitManager(COMPONENT_TYPE):
         # wait_queue, i.e. if they get rescheduled, or if they'll raise an
         # error.
 
-        # let the scheduler know...
-        for pilot_id in pilot_ids :
-            self._scheduler.pilot_removed (pilot_id)
-
-        # update instance list
-        for pilot_id in pilot_ids :
-            for pilot in self._pilots[:] :
-                if  pilot_id == pilot.uid :
-                    self._pilots.remove (pilot)
 
     # -------------------------------------------------------------------------
     #
@@ -419,8 +442,8 @@ class UnitManager(COMPONENT_TYPE):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` UIDs [`string`].
-
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
@@ -457,36 +480,17 @@ class UnitManager(COMPONENT_TYPE):
             unit_descriptions = [unit_descriptions]
 
         # we return a list of compute units
-        ret = list()
-
-        # the scheduler will return a dictionary of the form:
-        #   {
-        #     ud_1 : pilot_id_a,
-        #     ud_2 : pilot_id_b
-        #     ...
-        #   }
-        #
-        # The scheduler may not be able to schedule some units - those will
-        # have 'None' as pilot ID.
-
         units = list()
+
         for ud in unit_descriptions :
 
             units.append (ComputeUnit.create (unit_description=ud,
-                                              unit_manager_obj=self, 
-                                              local_state=NEW))
+                                              unit_manager_obj=self))
 
-        self._worker.publish_compute_units (units=units)
+        # TODO: publish units in DB
+        # TODO: push to scheduling queue (as dict)
 
-        schedule = None
-        try:
-            schedule = self._scheduler.schedule (units=units)
-       
-        except Exception as e:
-            logger.exception ("Internal error - unit scheduler failed")
-            raise 
-
-        self.handle_schedule (schedule)
+        self._unit_list += units
 
         if  return_list_type :
             return units
@@ -494,106 +498,13 @@ class UnitManager(COMPONENT_TYPE):
             return units[0]
 
 
-    # -------------------------------------------------------------------------
-    #
-    def handle_schedule (self, schedule) :
+        # FIXME: derive changed wait queue size
+        # old_wait_queue_size = self.wait_queue_size
 
-        # we want to use bulk submission to the pilots, so we collect all units
-        # assigned to the same set of pilots.  At the same time, we select
-        # unscheduled units for later insertion into the wait queue.
-        
-        if  not schedule :
-            logger.debug ('skipping empty unit schedule')
-            return
-
-      # print 'handle schedule:'
-      # import pprint
-      # pprint.pprint (schedule)
-      #
-        pilot_cu_map = dict()
-        unscheduled  = list()
-
-        pilot_ids = self.list_pilots ()
-
-        for unit in schedule['units'].keys() :
-
-            pid = schedule['units'][unit]
-
-            if  None == pid :
-                unscheduled.append (unit)
-                continue
-
-            else :
-
-                if  pid not in pilot_ids :
-                    raise RuntimeError ("schedule points to unknown pilot %s" % pid)
-
-                if  pid not in pilot_cu_map :
-                    pilot_cu_map[pid] = list()
-
-                pilot_cu_map[pid].append (unit)
-
-
-        # submit to all pilots which got something submitted to
-        for pid in pilot_cu_map.keys():
-
-            units_to_schedule = list()
-
-            # if a kernel name is in the cu descriptions set, do kernel expansion
-            for unit in pilot_cu_map[pid] :
-
-                if  not pid in schedule['pilots'] :
-                    # lost pilot, do not schedule unit
-                    logger.warn ("unschedule unit %s, lost pilot %s" % (unit.uid, pid))
-                    continue
-
-                unit.sandbox = schedule['pilots'][pid]['sandbox'] + "/" + str(unit.uid)
-
-                ud = unit.description
-
-                if  'kernel' in ud and ud['kernel'] :
-
-                    try :
-                        from radical.ensemblemd.mdkernels import MDTaskDescription
-                    except Exception as ex :
-                        logger.error ("Kernels are not supported in" \
-                              "compute unit descriptions -- install " \
-                              "radical.ensemblemd.mdkernels!")
-                        # FIXME: unit needs a '_set_state() method or something!
-                        self._session._dbs.set_compute_unit_state (unit._uid, FAILED, 
-                                ["kernel expansion failed"])
-                        continue
-
-                    pilot_resource = schedule['pilots'][pid]['resource']
-
-                    mdtd           = MDTaskDescription ()
-                    mdtd.kernel    = ud.kernel
-                    mdtd_bound     = mdtd.bind (resource=pilot_resource)
-                    ud.environment = mdtd_bound.environment
-                    ud.pre_exec    = mdtd_bound.pre_exec
-                    ud.executable  = mdtd_bound.executable
-                    ud.mpi         = mdtd_bound.mpi
-
-
-                units_to_schedule.append (unit)
-
-            if  len(units_to_schedule) :
-                self._worker.schedule_compute_units (pilot_uid=pid,
-                                                     units=units_to_schedule)
-
-
-        # report any change in wait_queue_size
-        old_wait_queue_size = self.wait_queue_size
-
-        self.wait_queue_size = len(unscheduled)
-        if  old_wait_queue_size != self.wait_queue_size :
-            self._worker.fire_manager_callback (WAIT_QUEUE_SIZE, self,
-                                                self.wait_queue_size)
-
-        if  len(unscheduled) :
-            self._worker.unschedule_compute_units (units=unscheduled)
-
-        logger.info ('%s units remain unscheduled' % len(unscheduled))
+        # self.wait_queue_size = len(unscheduled)
+        # if  old_wait_queue_size != self.wait_queue_size :
+        #     self._worker.fire_manager_callback (WAIT_QUEUE_SIZE, self,
+        #                                         self.wait_queue_size)
 
 
     # -------------------------------------------------------------------------
@@ -609,25 +520,23 @@ class UnitManager(COMPONENT_TYPE):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
-        return_list_type = True
         if (not isinstance(unit_ids, list)) and (unit_ids is not None):
             return_list_type = False
             unit_ids = [unit_ids]
 
-        units = ComputeUnit._get(unit_ids=unit_ids, unit_manager_obj=self)
+        # TODO: filter for uids
+        units = [unit for unit in self._unit_list if unit['_id'] in unit_ids]
 
         if  return_list_type :
             return units
         else :
             return units[0]
+
 
     # -------------------------------------------------------------------------
     #
@@ -665,11 +574,8 @@ class UnitManager(COMPONENT_TYPE):
             * **timeout** [`float`]
               Timeout in seconds before the call returns regardless of Pilot
               state changes. The default value **None** waits forever.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if  not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
@@ -681,7 +587,7 @@ class UnitManager(COMPONENT_TYPE):
             return_list_type = False
             unit_ids = [unit_ids]
 
-        units  = self.get_units (unit_ids)
+        units  = self._unit_list
         start  = time.time()
         all_ok = False
         states = list()
@@ -723,11 +629,8 @@ class UnitManager(COMPONENT_TYPE):
 
             * **unit_ids** [`string` or `list of strings`]: The IDs of the
               compute unit objects to cancel.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._uid:
             raise IncorrectState(msg="Invalid object instance.")
 
@@ -737,6 +640,11 @@ class UnitManager(COMPONENT_TYPE):
         cus = self.get_units(unit_ids)
         for cu in cus:
             cu.cancel()
+
+        # FIXME: send a CANCEL_UNIT command through all queues, and set DB
+        # entry.  Whoever receives the cancel call will simply drop the unit --
+        # we update the DB
+
 
 
     # -------------------------------------------------------------------------
@@ -773,5 +681,7 @@ class UnitManager(COMPONENT_TYPE):
         if  metric not in UNIT_MANAGER_METRICS :
             raise ValueError ("Metric '%s' is not available on the unit manager" % metric)
 
-        self._worker.register_manager_callback(callback_function, metric, callback_data)
+        # self._worker.register_manager_callback(callback_function, metric, callback_data)
+
+        # FIXME: this needs to go to our own worker thread
 

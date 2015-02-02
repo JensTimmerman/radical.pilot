@@ -49,74 +49,33 @@ class ComputeUnit(object):
 
     # -------------------------------------------------------------------------
     #
-    def __init__(self):
-        """ Le constructeur. Not meant to be called directly.
+    def __init__(ud, umgr=None):
+        """ 
         """
+        # sanity check on description
+        if  not (ud.get('executable') or ud.get('kernel')) :
+            raise PilotException ("ComputeUnitDescription needs an executable or application kernel")
+
         # 'static' members
-        self._uid = None
-        self._name = None
-        self._description = None
-        self._manager = None
+        self._description = copy.deepcopy (ud)  # keep the original ud reusable
+        self._uid         = ru.generate_id('unit.%(counter)06d', ru.ID_CUSTOM)
+        self._name        = self._description.get ('name')
+        self._manager     = umgr
+        self._local_state = UNKNOWN
 
-        # handle to the manager's worker
-        self._worker = None
-
-        if os.getenv("RADICAL_PILOT_GCDEBUG", None) is not None:
-            logger.debug("GCDEBUG __init__(): ComputeUnit [object id: %s]." % id(self))
-
-    #--------------------------------------------------------------------------
-    #
-    def __del__(self):
-        """Le destructeur.
-        """
-        if os.getenv("RADICAL_PILOT_GCDEBUG", None) is not None:
-            logger.debug("GCDEBUG __del__(): ComputeUnit [object id: %s]." % id(self))
+        # expand any staging directives
+        self._description.input_staging  = expand_staging_directive(self._description.get('input_staging'),  logger)
+        self._description.output_staging = expand_staging_directive(self._description.get('output_staging'), logger)
 
 
     #--------------------------------------------------------------------------
     #
     def __repr__(self):
 
-        return "%s (%-15s: %s %s) (%s)" % (self.uid, self.state,
-                                           self.description.executable, 
-                                           " ".join (self.description.arguments), 
-                                           id(self))
+        return "%s (%-15s: %s %s)" % (self.uid, self.state, 
+                                      self.description.executable, 
+                                      " ".join (self.description.arguments))
 
-
-    # -------------------------------------------------------------------------
-    #
-    @staticmethod
-    def create(unit_manager_obj, unit_description, local_state):
-        """ PRIVATE: Create a new compute unit.
-        """
-        # create and return pilot object
-        computeunit = ComputeUnit()
-
-        # Make a copy of the UD to work on without side-effects.
-        ud_copy = copy.deepcopy(unit_description)
-
-        # sanity check on description
-        if  (not 'executable' in unit_description or \
-             not unit_description['executable']   )  and \
-            (not 'kernel'     in unit_description or \
-             not unit_description['kernel']       )  :
-            raise PilotException ("ComputeUnitDescription needs an executable or application kernel")
-
-        # If staging directives exist, try to expand them
-        if  ud_copy.input_staging:
-            ud_copy.input_staging = expand_staging_directive(ud_copy.input_staging, logger)
-
-        if  ud_copy.output_staging:
-            ud_copy.output_staging = expand_staging_directive(ud_copy.output_staging, logger)
-
-        computeunit._description = ud_copy
-        computeunit._manager     = unit_manager_obj
-        computeunit._worker      = unit_manager_obj._worker
-        computeunit._uid         = ru.generate_id('unit.%(counter)06d', ru.ID_CUSTOM)
-        computeunit._name        = unit_description['name']
-        computeunit._local_state = local_state
-
-        return computeunit
 
     # -------------------------------------------------------------------------
     #

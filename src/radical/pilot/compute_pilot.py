@@ -469,7 +469,7 @@ class ComputePilot (object):
 
         # Wait until we can assume the pilot directory to be created
         if self.state == NEW:
-            self.wait(state=[PENDING_LAUNCH, LAUNCHING, PENDING_ACTIVE, ACTIVE])
+            self.wait(state=[LAUNCHING_PENDING, LAUNCHING, ACTIVE_PENDING, ACTIVE])
         elif self.state in [DONE, FAILED, CANCELED]:
             raise Exception("Pilot already finished, no need to stage anymore!")
 
