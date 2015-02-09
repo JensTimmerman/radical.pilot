@@ -10,23 +10,29 @@ import getpass
 import unittest
 
 from copy import deepcopy
-from radical.pilot.db import Session
 from pymongo import MongoClient
 
-# DBURL defines the MongoDB server URL and has the format mongodb://host:port.
-# For the installation of a MongoDB server, refer to the MongoDB website:
-# http://docs.mongodb.org/manual/installation/
-DBURL = os.getenv("RADICAL_PILOT_DBURL")
-if DBURL is None:
+import radical.utils as ru
+
+# RADICAL_PILOT_DBURL defines the MongoDB server URL and has the format
+# mongodb://host:port/db_name
+
+RP_DBENV = os.environ.get("RADICAL_PILOT_DBURL")
+if not RP_DBENV:
     print "ERROR: RADICAL_PILOT_DBURL (MongoDB server URL) is not defined."
     sys.exit(1)
+
+RP_DBURL = ru.Url (RP_DBENV)
+if not (RP_DBURL.path and len(RP_DBURL.path) > 1):
+    RP_DBURL=ru.generate_id ('rp_test.')
+
+DBURL      = ru.URL(RP_DBURL)
+DBURL.path = None
+DBURL      = str(DBURL)
+
+DBNAME     = RP_DBURL.path.lstrip('/')
+
     
-DBNAME = os.getenv("RADICAL_PILOT_TEST_DBNAME")
-if DBNAME is None:
-    print "ERROR: RADICAL_PILOT_TEST_DBNAME (MongoDB database name) is not defined."
-    sys.exit(1)
-
-
 #-----------------------------------------------------------------------------
 #
 class TestRemoteSubmission(unittest.TestCase):
@@ -63,7 +69,7 @@ class TestRemoteSubmission(unittest.TestCase):
     def test__remote_simple_submission(self):
         """ Test simple remote submission with one pilot.
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
         c = radical.pilot.Context('ssh')
         c.user_id  = self.test_ssh_uid
         c.user_key = self.test_ssh_key
@@ -95,15 +101,15 @@ class TestRemoteSubmission(unittest.TestCase):
 
         for cu in cus:
             assert cu is not None
-            assert cu.start_time is None
-            assert cu.stop_time is None
+            assert cu.started is None
+            assert cu.finished is None
 
         ret = um.wait_units(timeout=5*60)
         print "Return states from wait: %s" % ret
 
         for cu in cus:
             assert cu.state == radical.pilot.DONE, "state: %s" % cu.state
-            assert cu.stop_time is not None
+            assert cu.finished is not None
 
         pm.cancel_pilots()
 
@@ -114,7 +120,7 @@ class TestRemoteSubmission(unittest.TestCase):
     def test__remote_pilot_wait(self):
         """ Test if we can wait for different pilot states. 
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
         c = radical.pilot.Context('ssh')
         c.user_id  = self.test_ssh_uid
         c.user_key = self.test_ssh_key
@@ -132,19 +138,19 @@ class TestRemoteSubmission(unittest.TestCase):
         pilot = pm.submit_pilots(pilot_descriptions=cpd)
 
         assert pilot is not None
-        #assert cu.start_time is None
-        #assert cu.start_time is None
+        #assert cu.started is None
+        #assert cu.started is None
 
         pilot.wait(state=radical.pilot.ACTIVE, timeout=5*60)
         assert pilot.state == radical.pilot.ACTIVE
-        assert pilot.start_time is not None
-        assert pilot.submission_time is not None
+        assert pilot.started is not None
+        assert pilot.submitted is not None
 
 
         # the pilot should finish after it has reached run_time
         pilot.wait(timeout=5*60)
         assert pilot.state == radical.pilot.DONE
-        assert pilot.stop_time is not None
+        assert pilot.finished is not None
 
         session.close()
 
@@ -153,7 +159,7 @@ class TestRemoteSubmission(unittest.TestCase):
     def test__remote_pilot_cancel(self):
         """ Test if we can cancel a pilot. 
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
         c = radical.pilot.Context('ssh')
         c.user_id  = self.test_ssh_uid
         c.user_key = self.test_ssh_key
@@ -171,20 +177,20 @@ class TestRemoteSubmission(unittest.TestCase):
         pilot = pm.submit_pilots(pilot_descriptions=cpd)
 
         assert pilot is not None
-        #assert cu.start_time is None
-        #assert cu.start_time is None
+        #assert cu.started is None
+        #assert cu.started is None
 
         pilot.wait(state=radical.pilot.ACTIVE, timeout=5*60)
         assert pilot.state == radical.pilot.ACTIVE, "Expected state 'ACTIVE' but got %s" % pilot.state
-        assert pilot.submission_time is not None
-        assert pilot.start_time is not None
+        assert pilot.submitted is not None
+        assert pilot.started is not None
 
         # the pilot should finish after it has reached run_time
         pilot.cancel()
 
         pilot.wait(timeout=5*60)
         assert pilot.state == radical.pilot.CANCELED
-        assert pilot.stop_time is not None
+        assert pilot.finished is not None
 
         session.close()
 

@@ -62,11 +62,22 @@ class Session():
 
     #--------------------------------------------------------------------------
     #
-    def __init__(self, db_url, db_name="radicalpilot"):
-        """ Le constructeur. Should not be called directrly, but rather
-            via the static methods new() or reconnect().
-        """
+    def __init__(self, sid, db_url):
+        """ Creates a new session
 
+            A session is a distinct collection with three sub-collections
+            in MongoDB:
+
+            radical.pilot.<sid>    | Base collection. Holds some metadata.   | self._s
+            radical.pilot.<sid>.cu | Collection holding all compute units.   | self._w
+            radical.pilot.<sid>.um | Collection holding all unit managers.   | self._um
+            radical.pilot.<sid>.p  | Collection holding all pilots.          | self._p
+            radical.pilot.<sid>.pm | Collection holding all pilot managers.  | self._pm
+
+            All collections are created with a new session. Since MongoDB
+            uses lazy-create, they only appear in the database after the
+            first insert. That's ok.
+        """
         url = ru.Url (db_url)
 
         if  db_name :
@@ -93,44 +104,9 @@ class Session():
         self._p  = None
         self._pm = None
 
-    #--------------------------------------------------------------------------
-    #
-    @staticmethod
-    def new(sid, name, db_url, db_name="radicalpilot"):
-        """ Creates a new session (factory method).
-        """
         creation_time = datetime.datetime.utcnow()
 
         dbs = Session(db_url, db_name)
-        dbs.create(sid, name, creation_time)
-
-        connection_info = DBConnectionInfo(
-            session_id=sid,
-            dbname=dbs._dbname,
-            dbauth=dbs._dbauth,
-            dburl=dbs._dburl
-        )
-
-        return (dbs, creation_time, connection_info)
-
-    #--------------------------------------------------------------------------
-    #
-    def create(self, sid, name, creation_time):
-        """ Creates a new session (private).
-
-            A session is a distinct collection with three sub-collections
-            in MongoDB:
-
-            radical.pilot.<sid>    | Base collection. Holds some metadata.   | self._s
-            radical.pilot.<sid>.cu | Collection holding all compute units.   | self._w
-            radical.pilot.<sid>.um | Collection holding all unit managers.   | self._um
-            radical.pilot.<sid>.p  | Collection holding all pilots.          | self._p
-            radical.pilot.<sid>.pm | Collection holding all pilot managers.  | self._pm
-
-            All collections are created with a new session. Since MongoDB
-            uses lazy-create, they only appear in the database after the
-            first insert. That's ok.
-        """
 
         # make sure session doesn't exist already
         if  sid :
@@ -142,16 +118,25 @@ class Session():
 
         self._s = self._db["%s" % sid]
         self._s.insert({"_id"       : sid,
-                        "name"      : name,
                         "created"   : creation_time,
                         "connected" : creation_time})
 
-        # Create the collection shortcut:
+        # Create the collection shortcuts
         self._w  = self._db["%s.cu" % sid]
         self._um = self._db["%s.um" % sid] 
 
         self._p  = self._db["%s.p"  % sid]
         self._pm = self._db["%s.pm" % sid] 
+
+        connection_info = DBConnectionInfo(
+            session_id=sid,
+            dbname=dbs._dbname,
+            dbauth=dbs._dbauth,
+            dburl=dbs._dburl
+        )
+
+        return (dbs, creation_time, connection_info)
+
 
     #--------------------------------------------------------------------------
     #

@@ -7,12 +7,16 @@ __license__   = "MIT"
 #
 # definitions of metrics
 #
-UNIT_STATE           = 'UNIT_STATE'
-WAIT_QUEUE_SIZE      = 'WAIT_QUEUE_SIZE'
+UNIT_STATE            = 'UNIT_STATE'
+WAIT_QUEUE_SIZE       = 'WAIT_QUEUE_SIZE'
 
-UNIT_MANAGER_METRICS = [UNIT_STATE, 
-                        WAIT_QUEUE_SIZE]
+UNIT_MANAGER_METRICS  = [UNIT_STATE, 
+                         WAIT_QUEUE_SIZE]
 
+
+PILOT_STATE           = 'PILOT_STATE'
+
+PILOT_MANAGER_METRICS = [PILOT_STATE]
 
 # -----------------------------------------------------------------------------
 

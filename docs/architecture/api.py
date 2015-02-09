@@ -260,7 +260,7 @@ class ComputeUnitDescription(UnitDescription):
         'arguments',            # Arguments to the "action"
         'cleanup',              # cleanup after the CU has finished
         'environment',          # "environment" settings for the "action"
-        'start_time',           # When should the CU start
+        'started',           # When should the CU start
         'working_directory',    # Where to start the CU
 
         # I/O
@@ -613,7 +613,7 @@ class ComputePilotDescription(dict):
     Class members:
 
         # Action description
-        'start_time',               # pilot is not needed before X
+        'started',               # pilot is not needed before X
         'run_time',                 # pilot is not needed after  X
         'cleanup',
         'project',

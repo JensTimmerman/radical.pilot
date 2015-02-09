@@ -50,9 +50,9 @@ class State(object):
 # ComputePilot States
 UNKNOWN                      = 'Unknown'
 NEW                          = 'New'
-LAUNCHING_PENDING            = 'PendingLaunch'
+LAUNCHING_PENDING            = 'Launching_Pending'
 LAUNCHING                    = 'Launching'
-ACTIVE_PENDING               = 'PendingActive'
+ACTIVE_PENDING               = 'Active_Pending'
 ACTIVE                       = 'Active'
 DONE                         = 'Done'
 FAILED                       = 'Failed'
@@ -61,8 +61,8 @@ CANCELED                     = 'Canceled'
 
 # -----------------------------------------------------------------------------
 # ComputeUnit States
-UNKNOWN                      = 'Unknown'
-NEW                          = 'New'
+UNKNOWN                      = UNKNOWN
+NEW                          = NEW
 UMGR_SCHEDULING_PENDING      = 'UMGR_Scheduling_Pending'
 UMGR_SCHEDULING              = 'UMGR_Scheduling'
 UMGR_STAGING_INPUT_PENDING   = 'UMGR_Staging_Input_Pending'
@@ -71,15 +71,29 @@ AGENT_STAGING_INPUT_PENDING  = 'Agent_Staging_Input_Pending'
 AGENT_STAGING_INPUT          = 'Agent_Staging_Input'
 AGENT_SCHEDULING_PENDING     = 'Agent_Scheduling_Pending'
 AGENT_SCHEDULING             = 'Agent_Scheduling'
-EXECUTION_PENDING            = 'Execution_Pending'
+EXECUTION_PENDING            = 'Executing_Pending'
 EXECUTING                    = 'Executing'
 AGENT_STAGING_OUTPUT_PENDING = 'Agent_Staging_Output_Pending'
 AGENT_STAGING_OUTPUT         = 'Agent_Staging_Output'
 UMGR_STAGING_OUTPUT_PENDING  = 'UMGR_Staging_Output_Pending'
 UMGR_STAGING_OUTPUT          = 'UMGR_Staging_Output'
-DONE                         = 'Done'
-FAILED                       = 'Failed'
-CANCELED                     = 'Canceled'
+DONE                         = DONE
+FAILED                       = FAILED
+CANCELED                     = CANCELED
+
+
+# -----------------------------------------------------------------------------
+# Component and manager states
+ACTIVE                       = ACTIVE
+DONE                         = DONE
+FAILED                       = FAILED
+CANCELLED                    = CANCELLED
+
+
+# -----------------------------------------------------------------------------
+# initial and final states
+INITIAL                      = [NEW]
+FINAL                        = [DONE, FAILED, CANCELED]
 
 
 # -----------------------------------------------------------------------------

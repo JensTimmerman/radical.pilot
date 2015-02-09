@@ -318,7 +318,6 @@ class PilotLauncherWorker(threading.Thread):
                         # Database connection parameters
                         session_uid   = self.db_connection_info.session_id
                         database_url  = self.db_connection_info.dburl
-                        database_name = self.db_connection_info.dbname
                         database_auth = self.db_connection_info.dbauth
 
                         # ------------------------------------------------------
@@ -376,7 +375,10 @@ class PilotLauncherWorker(threading.Thread):
                         if not db_url.scheme: db_url.scheme = 'mongodb'
                         if not db_url.host  : db_url.host   = 'localhost'
                         if not db_url.port  : db_url.port   = 27017
-                        if not database_name: database_name = 'radicalpilot'
+
+                        database_name = db_url.path.lstrip('/')
+                        if not database_name: 
+                            database_name = 'radicalpilot'
 
                         # Create a host:port string for use by the bootstrapper.
                         database_hostport = "%s:%d" % (db_url.host, db_url.port)

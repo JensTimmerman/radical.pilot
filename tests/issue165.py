@@ -100,7 +100,7 @@ if __name__ == "__main__":
     umgr.wait_units()
 
     print "* Task %s - state: %s, exit code: %s, started: %s, finished: %s, stdout: %s" \
-        % (unit.uid, unit.state, unit.exit_code, unit.start_time, unit.stop_time, "n.a.")
+        % (unit.uid, unit.state, unit.exit_code, unit.started, unit.finished, "n.a.")
     assert (unit.state == rp.DONE)
 
     pmgr.cancel_pilots()

@@ -1,4 +1,4 @@
-    #pylint: disable=C0301, C0103, W0212
+#pylint: disable=C0301, C0103, W0212
 
 """
 .. module:: radical.pilot.unit_manager
@@ -17,6 +17,10 @@ import multiprocessing
 
 import radical.utils as ru
 
+from radical.pilot.types        import *
+from radical.pilot.states       import *
+from radical.pilot.exceptions   import *
+
 from radical.pilot.compute_unit import ComputeUnit
 from radical.pilot.utils.logger import logger
 
@@ -24,9 +28,6 @@ from radical.pilot.scheduler    import UMGR_Scheduler
 from radical.pilot.staging      import UMGR_Staging_Input
 from radical.pilot.staging      import UMGR_Staging_Output
 
-from radical.pilot.types        import *
-from radical.pilot.states       import *
-from radical.pilot.exceptions   import *
 
 # ------------------------------------------------------------------------------
 #
@@ -41,10 +42,12 @@ if UMGR_MODE == UMGR_THREADS :
     COMPONENT_MODE = threading
     COMPONENT_TYPE = threading.Thread
     QUEUE_TYPE     = multiprocessing.Queue
+    LOCK_TYPE      = multiprocessing.RLock
 elif UMGR_MODE == UMGR_PROCESSES :
     COMPONENT_MODE = multiprocessing
     COMPONENT_TYPE = multiprocessing.Process
     QUEUE_TYPE     = multiprocessing.Queue
+    LOCK_TYPE      = multiprocessing.RLock
 
 # component IDs
 
@@ -141,22 +144,35 @@ class UnitManager(COMPONENT_TYPE):
     def __init__(self, session, scheduler=None, uid=None):
         """Creates a new UnitManager and attaches it to the session.
 
-        **Args:**
+        **Arguments:**
 
             * session (`string`): The session instance to use.
 
             * scheduler (`string`): The name of the scheduler plug-in to use.
 
             * uid (`string`): If a UnitManager id is given, the backend is
-            * searched for an existing instance to reconnect to.
-              worker processes to launch in the background. 
+              searched for an existing instance to reconnect to.
+
+        **Returns:**
+
+            * A new `UnitManager` object [:class:`radical.pilot.UnitManager`].
         """
 
         COMPONENT_TYPE.__init__(self)
 
-        self._session = session
-        self._log     = session._log
+        self._session      = session
+        self._log          = session._log
+        self._updater      = session._updater
+        self._update_queue = session._updater_queue
 
+        # set up internal state
+        self._state          = ACTIVE
+        self._callbacks      = dict()
+        self._units          = list()  # dict?
+        self._pilots         = list()  # dict?
+        self._worker_list    = list()
+        self._scheduler_list = list()
+        self.wait_queue_size = 0       # FIXME: set and eval
 
         if uid :
             # FIXME: re-implement reconnect.  Basically need to dig out the
@@ -170,19 +186,10 @@ class UnitManager(COMPONENT_TYPE):
         # FIXME: should session be a factory after all?
         self._session._unit_manager_objects.append(self)
 
-        # keep track of some stuff
-        self.wait_queue_size = 0
-        self._unit_list      = list()
-        self._pilot_list     = list()
-        self._worker_list    = list()
-        self._scheduler_list = list()
-
         # we want to own all queues -- that simplifies startup and shutdown
         self._umgr_schedule_queue       = QUEUE_TYPE()
         self._umgr_staging_input_queue  = QUEUE_TYPE()
         self._umgr_staging_output_queue = QUEUE_TYPE()
-        self._update_queue              = QUEUE_TYPE()
-
 
 
         # spawn the scheduler instances (usually 1)
@@ -229,102 +236,65 @@ class UnitManager(COMPONENT_TYPE):
         # FIXME: also spawn a separate thread/process to pull for state updates
         # from mongodb, and to issue callbacks etc from there.  This will need
         # to be replaced with some queue, eventually -- for now we pull :/
+        # coordinate actions with worker thread/process
+        self._lock = LOCK_TYPE()
         self.start ()
 
 
-
-
-    #--------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     #
-    def close(self):
+    def close(self, terminate=True):
         """Shuts down the UnitManager and its background workers in a 
         coordinated fashion.
+
+        **Arguments:**
+
+            * **terminate** [`bool`]: If set to True, all active units will 
+              be canceled (default: False).
+
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
 
+        logger.debug("umgr    %s closing" % (str(self._uid)))
+
+        # if terminate is set, we cancel all units. 
+        if  terminate :
+
+            self.cancel ([unit.uid for unit in self.units if unit.state not in FINAL])
+
+        # drop object references
+        self._units  = list()
+        self._pilots = list()
+
+        # stop all threads etc
         for worker in self._worker_list:
             worker.stop()
+
+        self.stop()
 
         # also send a wakeup signals through all queues
         self._umgr_schedule_queue     .put(None)
         self._umgr_staging_input_queue.put(None)
         self._update_queue            .put(None)
 
-        logger.info("Closed UnitManager %s." % str(self._uid))
-
-
-    #--------------------------------------------------------------------------
-    #
-    @classmethod
-    def _reconnect(cls, session, unit_manager_id):
-        """Reconnect to an existing UnitManager.
-        """
-
-        raise NotImplementedError ("not yet implemented again")
-
-        # FIXME!
-
-      # uid_exists = UnitManagerController.uid_exists(
-      #     db_connection=session._dbs,
-      #     unit_manager_uid=unit_manager_id)
-      #
-      # if not uid_exists:
-      #     raise BadParameter(
-      #         "UnitManager with id '%s' not in database." % unit_manager_id)
-      #
-      # # The UnitManager object
-      # obj = cls(session=session, scheduler=None, _reconnect=True)
-      #
-      # # Retrieve or start a worker process fo this PilotManager instance.
-      # worker = session._process_registry.retrieve(unit_manager_id)
-      # if worker is not None:
-      #     obj._worker = worker
-      # else:
-      #     obj._worker = UnitManagerController(
-      #         unit_manager_uid=unit_manager_id,
-      #         session=session,
-      #         db_connection=session._dbs,
-      #         db_connection_info=session._connection_info)
-      #     session._process_registry.register(unit_manager_id, obj._worker)
-      #
-      # # start the worker if it's not already running
-      # if obj._worker.is_alive() is False:
-      #     obj._worker.start()
-      #
-      # # Now that the worker is running (again), we can get more information
-      # # about the UnitManager
-      # um_data = obj._worker.get_unit_manager_data()
-      #
-      # obj._scheduler = get_scheduler(name=um_data['scheduler'], 
-      #                                manager=obj,
-      #                                session=obj._session)
-      # # FIXME: we need to tell the scheduler about all the pilots...
-      #
-      # obj._uid = unit_manager_id
-      #
-      # logger.info("Reconnected to existing UnitManager %s." % str(obj))
-      # return obj
+        # bye bye Junimond...
+        self._state = CANCELED
+        logger.debug("umgr    %s closed" % (str(self._uid)))
 
 
     # -------------------------------------------------------------------------
     #
     def __str__(self):
-        """Returns a string representation of the UnitManager object.
-        """
-
-        if not self._uid:
-            raise IncorrectState(msg="Invalid object instance.")
 
         return self._uid
 
-    #--------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
     #
     @property
     def uid(self):
-        """Returns the unique id.
-        """
 
         return self._uid
 
@@ -341,9 +311,9 @@ class UnitManager(COMPONENT_TYPE):
               added to the unit manager.
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
-
+        
         if not isinstance(pilots, list):
             pilots = [pilots]
 
@@ -352,7 +322,8 @@ class UnitManager(COMPONENT_TYPE):
         for scheduler in self._scheduler_list :
             scheduler.add_pilot (pilots)
 
-        self._pilot_list += pilots
+        with self._lock:
+            self._pilots += pilots
 
 
     # -------------------------------------------------------------------------
@@ -366,10 +337,10 @@ class UnitManager(COMPONENT_TYPE):
               * A list of :class:`radical.pilot.ComputePilot` UIDs [`string`].
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
-
-        return [pilot['_id'] for pilot in self._pilot_list]
+        
+        return [pilot['_id'] for pilot in self._pilots]
 
 
     # -------------------------------------------------------------------------
@@ -383,10 +354,10 @@ class UnitManager(COMPONENT_TYPE):
               * A list of :class:`radical.pilot.ComputePilot` instances.
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
-
-        return self._pilot_list
+        
+        return self._pilots[:]
 
     # -------------------------------------------------------------------------
     #
@@ -407,19 +378,20 @@ class UnitManager(COMPONENT_TYPE):
               If `False` (the default), then `ACTIVE` units will be canceled.
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
-
+        
         if not isinstance(pilot_ids, list):
             pilot_ids = [pilot_ids]
 
         for scheduler in self._scheduler_list :
             scheduler.remove_pilots(pilot_ids)
 
-        for pilot_id in pilot_ids :
-            for pilot in self._pilot_list[:] :
-                if  pilot_id == pilot.uid :
-                    self._pilot_list.remove (pilot)
+        with self._lock:
+            for pilot_id in pilot_ids :
+                for pilot in self._pilots[:] :
+                    if  pilot_id == pilot.uid :
+                        self._pilots.remove (pilot)
 
         # TODO: update DB
 
@@ -430,24 +402,8 @@ class UnitManager(COMPONENT_TYPE):
         # -- those are ignored (they'll be in the done_queue anyways).  We leave
         # it to the scheduling policy what happens to non-NEW CUs in the
         # wait_queue, i.e. if they get rescheduled, or if they'll raise an
-        # error.
-
-
-    # -------------------------------------------------------------------------
-    #
-    def list_units(self):
-        """Returns the UIDs of the :class:`radical.pilot.ComputeUnit` managed by
-        this unit manager.
-
-        **Returns:**
-
-              * A list of :class:`radical.pilot.ComputeUnit` UIDs [`string`].
-        """
-
-        if not self._uid:
-            raise IncorrectState(msg="Invalid object instance.")
-
-        return self._worker.get_compute_unit_uids()
+        # error.  What happens to units in some intermediate state?  Need to be
+        # dropped...
 
 
     # -------------------------------------------------------------------------
@@ -464,14 +420,10 @@ class UnitManager(COMPONENT_TYPE):
 
         **Returns:**
 
-              * A list of :class:`radical.pilot.ComputeUnit` objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
+              * One or more :class:`radical.pilot.ComputeUnit` objects.
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
 
         return_list_type = True
@@ -479,75 +431,83 @@ class UnitManager(COMPONENT_TYPE):
             return_list_type  = False
             unit_descriptions = [unit_descriptions]
 
-        # we return a list of compute units
+        # we generate a list of compute units
         units = list()
 
         for ud in unit_descriptions :
-
-            units.append (ComputeUnit.create (unit_description=ud,
-                                              unit_manager_obj=self))
+            units.append (ComputeUnit (description=ud, umgr=self))
 
         # TODO: publish units in DB
         # TODO: push to scheduling queue (as dict)
 
-        self._unit_list += units
+        with self._lock:
+            self._units         += units
+           self.wait_queue_size += len(units)
 
-        if  return_list_type :
-            return units
-        else :
-            return units[0]
+        if  return_list_type : return units[:]
+        else                 : return units[0]
 
 
-        # FIXME: derive changed wait queue size
-        # old_wait_queue_size = self.wait_queue_size
+    # -------------------------------------------------------------------------
+    #
+    def list_units(self):
+        """Returns the UIDs of the :class:`radical.pilot.ComputeUnit` managed by
+        this unit manager.
 
-        # self.wait_queue_size = len(unscheduled)
-        # if  old_wait_queue_size != self.wait_queue_size :
-        #     self._worker.fire_manager_callback (WAIT_QUEUE_SIZE, self,
-        #                                         self.wait_queue_size)
+        **Returns:**
+
+              * A list of :class:`radical.pilot.ComputeUnit` UIDs [`string`].
+        """
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        return [unit.uid for unit in self._units]
 
 
     # -------------------------------------------------------------------------
     #
     def get_units(self, unit_ids=None):
-        """Returns one or more compute units identified by their IDs.
+        """Returns one or more :class:`radical.pilot.ComputeUnit` instances identified by their IDs.
 
         **Arguments:**
 
-            * **unit_ids** [`string` or `list of strings`]: The IDs of the
-              compute unit objects to return.
+            * **unit_uids** [string or`list of strings`]: If unit_uids is set,
+              only the Units with  the specified uids are returned. If
+              unit_uids is `None`, all Units are returned.
 
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` objects.
+              [`list of :class:`radical.pilot.ComputeUnit`].
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
 
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
+        if not unit_ids :
+            return self._units[:]
+
+        return_list_type = True
+        if not isinstance(unit_ids, list):
             return_list_type = False
             unit_ids = [unit_ids]
 
-        # TODO: filter for uids
-        units = [unit for unit in self._unit_list if unit['_id'] in unit_ids]
+        units = [unit for unit in self._units if unit.uid in unit_ids]
 
-        if  return_list_type :
-            return units
-        else :
-            return units[0]
+        if  return_list_type : return units
+        else                 : return units[0]
 
 
     # -------------------------------------------------------------------------
     #
-    def wait_units(self, unit_ids=None,
-                   state=[DONE, FAILED, CANCELED],
-                   timeout=None):
+    def wait_units(self, unit_ids=None, state=None, timeout=None):
         """Returns when one or more :class:`radical.pilot.ComputeUnits` reach a
         specific state.
 
         If `unit_uids` is `None`, `wait_units` returns when **all**
-        ComputeUnits reach the state defined in `state`.
+        ComputeUnits reach the state defined in `state`, or have progressed
+        beyond that state.
 
         **Example**::
 
@@ -560,8 +520,8 @@ class UnitManager(COMPONENT_TYPE):
               uids are considered. If unit_uids is `None` (default), all
               ComputeUnits are considered.
 
-            * **state** [`string`]
-              The state that ComputeUnits have to reach in order for the call
+            * **state** ['string' or 'list of strings`]
+              The state(s) that ComputeUnits have to reach in order for the call
               to return.
 
               By default `wait_units` waits for the ComputeUnits to
@@ -572,52 +532,88 @@ class UnitManager(COMPONENT_TYPE):
               * :data:`radical.pilot.CANCELED`
 
             * **timeout** [`float`]
-              Timeout in seconds before the call returns regardless of Pilot
+              Timeout in seconds before the call returns regardless of Unit
               state changes. The default value **None** waits forever.
         """
 
-        if  not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
+
+        state_values = {NEW                          :  0,
+                        UMGR_SCHEDULING_PENDING      :  1,
+                        UMGR_SCHEDULING              :  2,
+                        UMGR_STAGING_INPUT_PENDING   :  3,
+                        UMGR_STAGING_INPUT           :  4,
+                        AGENT_STAGING_INPUT_PENDING  :  5,
+                        AGENT_STAGING_INPUT          :  6,
+                        AGENT_SCHEDULING_PENDING     :  7,
+                        AGENT_SCHEDULING             :  8,
+                        EXECUTION_PENDING            :  9,
+                        EXECUTING                    : 10,
+                        AGENT_STAGING_OUTPUT_PENDING : 11,
+                        AGENT_STAGING_OUTPUT         : 12,
+                        UMGR_STAGING_OUTPUT_PENDING  : 13,
+                        UMGR_STAGING_OUTPUT          : 14,
+                        DONE                         : 15,
+                        FAILED                       : 15,
+                        CANCELED                     : 15}
+
+        if not state:
+            state = [DONE, FAILED, CANCELED]
 
         if not isinstance(state, list):
             state = [state]
 
         return_list_type = True
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
-            return_list_type = False
-            unit_ids = [unit_ids]
+        if not unit_ids :
+            units = self._units
+        else :
+            if not isinstance(unit_ids, list):
+                return_list_type = False
+                units = self.get_units ([unit_ids])
+            else:
+                units = self.get_units (unit_ids)
 
-        units  = self._unit_list
+        # we don't need to check units over and over again, once they satisfy
+        # the state condition -- so keep a check list and reduce it over time
+        checklist = units[:]
+
         start  = time.time()
-        all_ok = False
         states = list()
 
-        while not all_ok :
-
-            all_ok = True
-            states = list()
-
-            for unit in units :
-                if  unit.state not in state :
-                    all_ok = False
-
-                states.append (unit.state)
+        while True :
 
             # check timeout
-            if  (None != timeout) and (timeout <= (time.time() - start)):
-                if  not all_ok :
-                    logger.debug ("wait timed out: %s" % states)
-                break
+            if  timeout and (timeout <= (time.time()-start)):
+                logger.debug ("wait timed out: %s" % states)
 
-            # sleep a little if this cycle was idle
-            if  not all_ok :
-                time.sleep (0.1)
+                if return_list_type : return [unit.state for unit in units]
+                else                : return units[0].state
 
-        # done waiting
-        if  return_list_type :
-            return states
-        else :
-            return states[0]
+            # sleep a little if previous cycle was idle
+            time.sleep (0.1)
+
+            # check unit states
+            all_ok = True
+            for unit in checklist[:] :
+                
+                unit_ok    = False
+                unit_state = unit.state
+                
+                for s in state:
+                    if  state_values(unit_state) >= state_values(s):
+                        unit_ok = True
+                        checklist.remove(unit) # don't check this one anymore...
+                        break
+
+                if not unit_ok :
+                    all_ok = False
+                    break
+
+            if all_ok:
+                # did not see a 'not unit_ok', so declare success!
+                if return_list_type : return [unit.state for unit in units]
+                else                : return units[0].state
 
 
     # -------------------------------------------------------------------------
@@ -627,35 +623,34 @@ class UnitManager(COMPONENT_TYPE):
 
         **Arguments:**
 
-            * **unit_ids** [`string` or `list of strings`]: The IDs of the
-              compute unit objects to cancel.
+            * **unit_ids** [`string` or `list of strings`]
+              If unit_uids is set, only the Units with the specified uids are
+              canceled. If unit_uids is `None`, all Units are canceled.
         """
 
-        if not self._uid:
+        if self._state in FINAL:
             raise IncorrectState(msg="Invalid object instance.")
 
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
-            unit_ids = [unit_ids]
+        units = self.get_units (unit_ids)
 
-        cus = self.get_units(unit_ids)
+        # FIXME:
+        # cancelling units needs two actions:
+        #   - setting the state in the DB to CANCELLED
+        #   - sending CANCEL_UNIT commands to all components downstream of 
+        #     the current units. Whoever receives the cancel call will simply 
+        #     drop the unit.
+
         for cu in cus:
             cu.cancel()
-
-        # FIXME: send a CANCEL_UNIT command through all queues, and set DB
-        # entry.  Whoever receives the cancel call will simply drop the unit --
-        # we update the DB
-
 
 
     # -------------------------------------------------------------------------
     #
     def register_callback(self, callback_function, metric=UNIT_STATE, callback_data=None):
-
-        """
-        Registers a new callback function with the UnitManager.  Manager-level
-        callbacks get called if the specified metric changes.  The default
+        """Registers a new callback function with the UnitManager.  
+        Manager-level callbacks get called if the specified metric changes.  The default
         metric `UNIT_STATE` fires the callback if any of the ComputeUnits
-        managed by the PilotManager change their state.
+        managed by the UnitManager change their state.
 
         All callback functions need to have the same signature::
 
@@ -663,7 +658,7 @@ class UnitManager(COMPONENT_TYPE):
 
         where ``object`` is a handle to the object that triggered the callback,
         ``value`` is the metric, and ``data`` is the data provided on
-        callback registration..  In the example of `UNIT_STATE` above, the
+        callback registration.  In the example of `UNIT_STATE` above, the
         object would be the unit in question, and the value would be the new
         state of the unit.
 
@@ -671,17 +666,25 @@ class UnitManager(COMPONENT_TYPE):
 
           * `UNIT_STATE`: fires when the state of any of the units which are
             managed by this unit manager instance is changing.  It communicates
-            the unit object instance and the units new state.
+            the unit object instance and the unit's new state.
 
           * `WAIT_QUEUE_SIZE`: fires when the number of unscheduled units (i.e.
             of units which have not been assigned to a pilot for execution)
             changes.
         """
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
 
         if  metric not in UNIT_MANAGER_METRICS :
             raise ValueError ("Metric '%s' is not available on the unit manager" % metric)
 
-        # self._worker.register_manager_callback(callback_function, metric, callback_data)
+        with self._lock :
 
-        # FIXME: this needs to go to our own worker thread
+            if not metric in self._callbacks :
+                self._callbacks[metric] = list()
+
+            self._callbacks[metric].append (callback_function, callback_state)
+
+
+# ------------------------------------------------------------------------------
 

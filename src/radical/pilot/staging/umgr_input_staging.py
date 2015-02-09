@@ -12,7 +12,7 @@ import saga
 import saga.filesystem as sfs
 
 from   radical.pilot.states             import *
-from   radical.pilot.update_worker      import UpdateWorker
+from   radical.pilot.updater            import UnitUpdater
 from   radical.pilot.staging_directives import CREATE_PARENTS
 
 # ------------------------------------------------------------------------------
@@ -107,9 +107,9 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
                 if not cu:
                     continue
 
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = UMGR_STAGING_INPUT)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = UMGR_STAGING_INPUT)
 
               # cu_list = rpu.blowup(cu, UMGR_STAGING_INPUT) 
 
@@ -118,14 +118,14 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
 
                     if cu['Agent_Input_Directives']:
                         # agent staging is needed
-                        UpdateWorker.update_unit(queue = self._update_queue, 
-                                                 cu    = cu,
-                                                 state = AGENT_STAGING_INPUT_PENDING)
+                        UnitUpdater.update_unit(queue = self._update_queue, 
+                                                cu    = cu,
+                                                state = AGENT_STAGING_INPUT_PENDING)
                     else:
                         # no agent input staging needed -- schedule for execution
-                        UpdateWorker.update_unit(queue = self._update_queue, 
-                                                 cu    = cu,
-                                                 state = AGENT_SCHEDULING_PENDING)
+                        UnitUpdater.update_unit(queue = self._update_queue, 
+                                                cu    = cu,
+                                                state = AGENT_SCHEDULING_PENDING)
 
                 except Exception as e:
 
@@ -134,10 +134,10 @@ class UMGR_Staging_Input(COMPONENT_TYPE):
                     self._log.exception(msg)
 
                     # If a staging directive fails, fail the CU also.
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = FAILED,
-                                             msg   = msg)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = FAILED,
+                                            msg   = msg)
 
             except Exception as e:
                 self._log.exception('%s died', self.name)

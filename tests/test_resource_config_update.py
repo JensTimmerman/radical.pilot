@@ -113,7 +113,7 @@ if __name__ == "__main__":
         units = [units]
     for unit in units:
         print "* Task %s (executed @ %s) state: %s, exit code: %s, started: %s, finished: %s, output: %s" \
-            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.start_time, unit.stop_time,
+            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.started, unit.finished,
                unit.stdout)
 
         assert (unit.state == rp.DONE)

@@ -15,57 +15,87 @@ import os
 import bson
 import glob
 import copy
+import threading
+import multiprocessing
+
 import saga
 import radical.utils as ru
 
-from radical.pilot.object          import Object
 from radical.pilot.unit_manager    import UnitManager
 from radical.pilot.pilot_manager   import PilotManager
 from radical.pilot.utils.logger    import logger
 from radical.pilot.resource_config import ResourceConfig
 from radical.pilot.exceptions      import PilotException
+from radical.pilot.updater         import UnitUpdater
 
 from radical.pilot.db              import Session as dbSession
 from radical.pilot.db              import DBException
 
 
+SESSION_THREADS   = 'threading'
+SESSION_PROCESSES = 'multiprocessing'
+
+SESSION_MODE      = SESSION_THREADS
+
+if SESSION_MODE == SESSION_THREADS:
+    COMPONENT_MODE = threading
+    COMPONENT_TYPE = threading.Thread
+    QUEUE_TYPE     = multiprocessing.Queue
+elif SESSION_MODE == SESSION_PROCESSES:
+    COMPONENT_MODE = multiprocessing
+    COMPONENT_TYPE = multiprocessing.Process
+    QUEUE_TYPE     = multiprocessing.Queue
+
+# component IDs
+
+UPDATER = 'Updater'
+
+# Number of worker threads
+NUMBER_OF_WORKERS = {
+        UPDATER  :   1
+}
+
+# factor by which the number of units are increased at a certain step.  Value of
+# '1' will leave the units unchanged.  Any blowup will leave on unit as the
+# original, and will then create clones with an changed unit ID (see blowup()).
+BLOWUP_FACTOR = {
+        UPDATER  :   1
+}
+
+# flag to drop all blown-up units at some point in the pipeline.  The units
+# with the original IDs will again be left untouched, but all other units are
+# silently discarded.
+DROP_CLONES = {
+        UPDATER  : True
+}
+
 # ------------------------------------------------------------------------------
 #
-class _ProcessRegistry(object):
-    """A _ProcessRegistry contains a dictionary of all worker processes 
-    that are currently active.
-    """
-    def __init__(self):
-        self._dict = dict()
+# config flags 
+#
+# FIXME: move to some RP config
+#
+rp_config = {
+    # max time period to collec db requests into bulks (seconds)
+    'bulk_collection_time' : 1.0,
+    
+    # time to sleep between queue polls (seconds)
+    'queue_poll_sleeptime' : 0.1,
+    
+    # time to sleep between database polls (seconds)
+    'db_poll_sleeptime'    : 0.1,
+    
+    # time between checks of internal state and commands from mothership (seconds)
+    'heartbeat_interval'   : 10,
+}
+rp_config['blowup_factor']     = BLOWUP_FACTOR
+rp_config['drop_clones']       = DROP_CLONES
+rp_config['number_of_workers'] = NUMBER_OF_WORKERS
 
-    def register(self, key, process):
-        """Add a new process to the registry.
-        """
-        if key not in self._dict:
-            self._dict[key] = process
-
-    def retrieve(self, key):
-        """Retrieve a process from the registry.
-        """
-        if key not in self._dict:
-            return None
-        else:
-            return self._dict[key]
-
-    def keys(self):
-        """List all keys of all process in the registry.
-        """
-        return self._dict.keys()
-
-    def remove(self, key):
-        """Remove a process from the registry.
-        """
-        if key in self._dict:
-            del self._dict[key]
 
 # ------------------------------------------------------------------------------
 #
-class Session (saga.Session, Object):
+class Session(saga.Session):
     """A Session encapsulates a RADICAL-Pilot instance and is the *root* object
     for all other RADICAL-Pilot objects. 
 
@@ -87,8 +117,7 @@ class Session (saga.Session, Object):
 
     #---------------------------------------------------------------------------
     #
-    def __init__ (self, database_url=None, database_name="radicalpilot",
-                  uid=None, name=None):
+    def __init__(self, database_url=None, uid=None, name=None):
         """Creates a new or reconnects to an exising session.
 
         If called without a uid, a new Session instance is created and 
@@ -99,9 +128,6 @@ class Session (saga.Session, Object):
             * **database_url** (`string`): The MongoDB URL.  If none is given,
               RP uses the environment variable RADICAL_PILOT_DBURL.  If that is
               not set, an error will be raises.
-
-            * **database_name** (`string`): An alternative database name 
-              (default: 'radicalpilot').
 
             * **uid** (`string`): If uid is set, we try 
               re-connect to an existing session instead of creating a new one.
@@ -117,151 +143,134 @@ class Session (saga.Session, Object):
         """
 
         # init the base class inits
-        saga.Session.__init__ (self)
-        Object.__init__ (self)
+        saga.Session.__init__(self)
+
+        # set up own state
+        self._state  = ACTIVE
+        self._config = rp_config   # FIXME: get from somewhere...
 
         # before doing anything else, set up the debug helper for the lifetime
         # of the session.
-        self._debug_helper = ru.DebugHelper ()
+        self._debug_helper = ru.DebugHelper()
         self._log          = logger
 
-        # Dictionaries holding all manager objects created during the session.
+        # dictionaries holding all manager objects created during the session
+        # (on shutdown, we need to signal them all)
         self._pilot_manager_objects = list()
-        self._unit_manager_objects = list()
+        self._unit_manager_objects  = list()
 
-        # Create a new process registry. All objects belonging to this 
-        # session will register their worker processes (if they have any)
-        # in this registry. This makes it easier to shut down things in 
-        # a more coordinate fashion. 
-        self._process_registry = _ProcessRegistry()
+        # database handles
+        if not database_url:
+            database_url = os.environ.get("RADICAL_PILOT_DBURL", None)
 
-        # The resource configuration dictionary associated with the session.
-        self._resource_configs = {}
+        if not database_url:
+            raise PilotException("no database URL (set RADICAL_PILOT_DBURL)")  
 
-        self._database_url  = database_url
-        self._database_name = database_name 
+        self._database_url = ru.Url(database_url)
 
-        if  not self._database_url :
-            self._database_url = os.getenv ("RADICAL_PILOT_DBURL", None)
+        # if the database url contains no path element (ie. database name), we 
+        # set the default to 'radicalpilot'
+        if not (self._database_url.path and len(self._database_url.path) > 1):
+            self._database_url.path = 'radicalpilot'
 
-        if  not self._database_url :
-            raise PilotException ("no database URL (set RADICAL_PILOT_DBURL)")  
-
-        self._log.info("using database url  %s" % self._database_url)
-
-        # if the database url contains a path element, we interpret that as
-        # database name (without the leading slash)
-        tmp_url = ru.Url (self._database_url)
-        if  tmp_url.path            and \
-            tmp_url.path[0]  == '/' and \
-            len(tmp_url.path) >  1  :
-            self._database_name = tmp_url.path[1:]
-            self._log.info("using database path %s" % self._database_name)
-        else :
-            self._log.info("using database name %s" % self._database_name)
+        self._log.info("using database url %s", self._database_url)
 
         # Loading all "default" resource configurations
+        self._resource_configs = dict()
+
         module_path   = os.path.dirname(os.path.abspath(__file__))
         default_cfgs  = "%s/configs/*.json" % module_path
         config_files  = glob.glob(default_cfgs)
 
         for config_file in config_files:
 
-            try :
+            try:
                 rcs = ResourceConfig.from_file(config_file)
-            except Exception as e :
-                self._log.error ("skip config file %s: %s" % (config_file, e))
+            except Exception as e:
+                self._log.error("skip config file %s: %s", config_file, e)
                 continue
 
             for rc in rcs:
-                self._log.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s", rc)
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
-        user_cfgs     = "%s/.radical/pilot/configs/*.json" % os.environ.get ('HOME')
+        user_cfgs     = "%s/.radical/pilot/configs/*.json" % os.environ.get('HOME')
         config_files  = glob.glob(user_cfgs)
+
 
         for config_file in config_files:
 
-            try :
+            try:
                 rcs = ResourceConfig.from_file(config_file)
-            except Exception as e :
-                self._log.error ("skip config file %s: %s" % (config_file, e))
+            except Exception as e:
+                self._log.error("skip config file %s: %s", config_file, e)
                 continue
 
             for rc in rcs:
-                self._log.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s", rc)
 
-                if  rc in self._resource_configs :
+                if rc in self._resource_configs:
                     # config exists -- merge user config into it
-                    ru.dict_merge (self._resource_configs[rc],
-                                   rcs[rc].as_dict(),
-                                   policy='overwrite')
-                else :
+                    ru.dict_merge(self._resource_configs[rc],
+                                  rcs[rc].as_dict(),
+                                  policy='overwrite')
+                else:
                     # new config -- add as is
                     self._resource_configs[rc] = rcs[rc].as_dict() 
 
         default_aliases = "%s/configs/aliases.json" % module_path
-        self._resource_aliases = ru.read_json_str (default_aliases)['aliases']
+        self._resource_aliases = ru.read_json_str(default_aliases)['aliases']
 
-        ##########################
-        ## CREATE A NEW SESSION ##
-        ##########################
-        if uid is None:
+        # ----------------------------------------------------------------------
+        #
+        if uid:
+            # FIXME: reconnect
+            raise NotImplementedError('oops')
+
+        else:
             try:
                 self._connected  = None
 
-                if name :
-                    self._name = name
-                    self._uid  = name
-                  # self._uid  = ru.generate_id ('rp.session.'+name+'.%(item_counter)06d', mode=ru.ID_CUSTOM)
-                else :
-                    self._uid  = ru.generate_id ('rp.session', mode=ru.ID_PRIVATE)
-                    self._name = self._uid
+                if name: self._uid = name
+                else   : self._uid = ru.generate_id('rp.session', mode=ru.ID_PRIVATE)
 
+                self._data = UnitUpdater.insert_session (self._database_url, 
+                        self._uid, self._config)
 
-                self._dbs, self._created, self._connection_info = \
-                        dbSession.new(sid     = self._uid,
-                                      name    = self._name,
-                                      db_url  = self._database_url,
-                                      db_name = database_name)
-
-                self._log.info("New Session created%s." % str(self))
+                self._log.info("New Session created (%s)", self)
 
             except Exception, ex:
-                self._log.exception ('session create failed')
+                self._log.exception('session create failed')
                 raise PilotException("Couldn't create new session (database URL '%s' incorrect?): %s" \
                                 % (self._database_url, ex))  
 
-        ######################################
-        ## RECONNECT TO AN EXISTING SESSION ##
-        ######################################
-        else:
-            try:
-                self._uid = uid
 
-                # otherwise, we reconnect to an existing session
-                self._dbs, session_info, self._connection_info = \
-                        dbSession.reconnect(sid=self._uid, 
-                                            db_url=self._database_url,
-                                            db_name=database_name)
 
-                self._created   = session_info["created"]
-                self._connected = session_info["connected"]
+        self._worker_list  = list()
+        self._update_queue = QUEUE_TYPE()
 
-                self._log.info("Reconnected to existing Session %s." % str(self))
-
-            except Exception, ex:
-                raise PilotException("Couldn't re-connect to session: %s" % ex)  
-
-    #---------------------------------------------------------------------------
-    #
-    def __del__ (self) :
-        self.close ()
+        # spawn updater threads/procs/...
+        for n in range(rp_config['number_of_workers'][UPDATER]):
+            worker = UnitUpdater(
+                name         = "Updater-%d" % n,
+                config       = rp_config, 
+                logger       = self._log,
+                session_id   = self._uid,
+                update_queue = self._update_queue,
+                dburl        = self._database_url)
+            self._worker_list.append(worker)
 
 
     #---------------------------------------------------------------------------
     #
-    def close(self, cleanup=True, terminate=True, delete=None):
+    def __del__(self):
+
+        self.close(cleanup=True, terminate=True)
+
+
+    #---------------------------------------------------------------------------
+    #
+    def close(self, cleanup=True, terminate=True):
         """Closes the session.
 
         All subsequent attempts access objects attached to the session will 
@@ -277,7 +286,10 @@ class Session (saga.Session, Object):
               or doesn't exist. 
         """
 
-        self._log.debug("session %s closing" % (str(self._uid)))
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
+        self._log.debug("session %s closing", self._uid)
 
         uid = self._uid
 
@@ -285,65 +297,52 @@ class Session (saga.Session, Object):
             self._log.error("Session object already closed.")
             return
 
-        # we keep 'delete' for backward compatibility.  If it was set, and the
-        # other flags (cleanup, terminate) are as defaulted (True), then delete
-        # will supercede them.  Delete is considered deprecated though, and
-        # we'll thus issue a warning.
-        if  delete != None:
-
-            if  cleanup == True and terminate == True :
-                cleanup   = delete
-                terminate = delete
-                self._log.warning("'delete' flag on session is deprecated. " \
-                               "Please use 'cleanup' and 'terminate' instead!")
-
-        if  cleanup :
+        if cleanup:
             # cleanup implies terminate
             terminate = True
 
         for pmgr in self._pilot_manager_objects:
-            self._log.debug("session %s closes   pmgr   %s" % (str(self._uid), pmgr._uid))
-            pmgr.close (terminate=terminate)
-            self._log.debug("session %s closed   pmgr   %s" % (str(self._uid), pmgr._uid))
+            self._log.debug("session %s closes   pmgr   %s", self._uid, pmgr._uid)
+            pmgr.close(terminate=terminate)
+            self._log.debug("session %s closed   pmgr   %s", self._uid, pmgr._uid)
 
         for umgr in self._unit_manager_objects:
-            self._log.debug("session %s closes   umgr   %s" % (str(self._uid), umgr._uid))
-            umgr.close()
-            self._log.debug("session %s closed   umgr   %s" % (str(self._uid), umgr._uid))
+            self._log.debug("session %s closes   umgr   %s", self._uid, umgr._uid)
+            umgr.close(termindate=terminate)
+            self._log.debug("session %s closed   umgr   %s", self._uid, umgr._uid)
 
-        if  cleanup :
-            self._destroy_db_entry()
+        if cleanup:
+            self._data = UnitUpdater.delete_session (self._database_url, self._uid)
+            self._log.info("session %s deleted", self._uid)
 
-        self._log.debug("session %s closed" % (str(self._uid)))
+        self._state = CANCELLED
 
 
-    #---------------------------------------------------------------------------
-    #
-    def as_dict(self):
-        """Returns a Python dictionary representation of the object.
-        """
-        object_dict = {
-            "uid"           : self._uid,
-            "created"       : self._created,
-            "connected"     : self._connected ,
-            "database_name" : self._connection_info.dbname,
-            "database_auth" : self._connection_info.dbauth,
-            "database_url"  : self._connection_info.dburl
-        }
-        return object_dict
+        self._log.debug("session %s closed", self._uid)
+
 
     #---------------------------------------------------------------------------
     #
     def __str__(self):
-        """Returns a string representation of the object.
-        """
-        return str(self.as_dict())
+
+        return self._uid
+
 
     #---------------------------------------------------------------------------
     #
     @property
-    def name(self):
-        return self._name
+    def uid(self):
+
+        return self._uid
+
+
+    #---------------------------------------------------------------------------
+    #
+    @property
+    def state(self):
+
+        return self._state
+
 
     #---------------------------------------------------------------------------
     #
@@ -351,38 +350,26 @@ class Session (saga.Session, Object):
     def created(self):
         """Returns the UTC date and time the session was created.
         """
-        self._assert_obj_is_valid()
-        return self._created
+        return self._data['created']
+
 
     #---------------------------------------------------------------------------
     #
     @property
-    def connected (self):
-        """Returns the most recent UTC date and time the session was
-        reconnected to.
+    def modified(self):
+        """Returns the UTC date and time the session was last modified.
         """
-        self._assert_obj_is_valid()
-        return self._connected 
+        return self._data['modified']
 
 
     #---------------------------------------------------------------------------
     #
-    def _destroy_db_entry(self):
-        """Terminates the session and removes it from the database.
-
-        All subsequent attempts access objects attached to the session and 
-        attempts to re-connect to the session via its uid will result in
-        an error.
-
-        **Raises:**
-            * :class:`radical.pilot.IncorrectState` if the session is closed
-              or doesn't exist. 
+    @property
+    def deleted(self):
+        """Returns the UTC date and time the session was deleted.
         """
-        self._assert_obj_is_valid()
+        return self._data['deleted']
 
-        self._dbs.delete()
-        self._log.info("Deleted session %s from database." % self._uid)
-        self._uid = None
 
     #---------------------------------------------------------------------------
     #
@@ -398,18 +385,17 @@ class Session (saga.Session, Object):
 
         **Returns:**
             * A list of :class:`radical.pilot.PilotManager` uids (`list` oif strings`).
-
-        **Raises:**
-            * :class:`radical.pilot.IncorrectState` if the session is closed
-              or doesn't exist. 
         """
-        self._assert_obj_is_valid()
-        return self._dbs.list_pilot_manager_uids()
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
+        return self._data['pmgr']
 
 
     # --------------------------------------------------------------------------
     #
-    def get_pilot_managers(self, pilot_manager_ids=None) :
+    def get_pilot_managers(self, uids=None):
         """ Re-connects to and returns one or more existing PilotManager(s).
 
         **Arguments:**
@@ -424,35 +410,28 @@ class Session (saga.Session, Object):
         **Returns:**
 
             * One or more new [:class:`radical.pilot.PilotManager`] objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.pilotException` if a PilotManager with 
-              `pilot_manager_uid` doesn't exist in the database.
         """
-        self._assert_obj_is_valid()
 
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
         return_scalar = False
 
-        if pilot_manager_ids is None:
-            pilot_manager_ids = self.list_pilot_managers()
+        if not uids:
+            uids = self.list_pilot_managers ()
 
-        elif not isinstance(pilot_manager_ids, list):
-            pilot_manager_ids = [pilot_manager_ids]
+        elif not isinstance(uids, list):
+            uids = [uids]
             return_scalar = True
 
-        pilot_manager_objects = []
+        ret = []
 
-        for pilot_manager_id in pilot_manager_ids:
-            pilot_manager = PilotManager._reconnect(session=self, pilot_manager_id=pilot_manager_id)
-            pilot_manager_objects.append(pilot_manager)
+        for uid in uids:
+            ret.append(PilotManager(session=self, uid=uid))
 
-            self._pilot_manager_objects.append(pilot_manager)
+        if return_scalar: return ret[0]
+        else            : return ret
 
-        if return_scalar is True:
-            pilot_manager_objects = pilot_manager_objects[0]
-
-        return pilot_manager_objects
 
     #---------------------------------------------------------------------------
     #
@@ -468,17 +447,17 @@ class Session (saga.Session, Object):
 
         **Returns:**
             * A list of :class:`radical.pilot.UnitManager` uids (`list` of `strings`).
-
-        **Raises:**
-            * :class:`radical.pilot.IncorrectState` if the session is closed
-              or doesn't exist. 
         """
-        self._assert_obj_is_valid()
-        return self._dbs.list_unit_manager_uids()
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
+        return self._data['umgr']
+
 
     # --------------------------------------------------------------------------
     #
-    def get_unit_managers(self, unit_manager_ids=None) :
+    def get_unit_managers(self, uids=None):
         """ Re-connects to and returns one or more existing UnitManager(s).
 
         **Arguments:**
@@ -493,34 +472,28 @@ class Session (saga.Session, Object):
         **Returns:**
 
             * One or more new [:class:`radical.pilot.PilotManager`] objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.pilotException` if a PilotManager with 
-              `pilot_manager_uid` doesn't exist in the database.
         """
-        self._assert_obj_is_valid()
 
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
         return_scalar = False
-        if unit_manager_ids is None:
-            unit_manager_ids = self.list_unit_managers()
 
-        elif not isinstance(unit_manager_ids, list):
-            unit_manager_ids = [unit_manager_ids]
+        if uids is None:
+            uids = self.list_unit_managers()
+
+        elif not isinstance(uids, list):
+            uids = [uids]
             return_scalar = True
 
-        unit_manager_objects = []
+        ret = []
 
-        for unit_manager_id in unit_manager_ids:
-            unit_manager = UnitManager._reconnect(session=self, unit_manager_id=unit_manager_id)
-            unit_manager_objects.append(unit_manager)
+        for uid in uids:
+            ret.append (UnitManager (session=self, uid=uid))
 
-            self._unit_manager_objects.append(unit_manager)
+        if return_scalar: return ret[0]
+        else            : return ret
 
-        if return_scalar is True:
-            unit_manager_objects = unit_manager_objects[0]
-
-        return unit_manager_objects
 
     # -------------------------------------------------------------------------
     #
@@ -548,48 +521,59 @@ class Session (saga.Session, Object):
 
                   pilot = pm.submit_pilots(pd)
         """
-        if  isinstance (resource_config, basestring) :
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
+        if isinstance(resource_config, basestring):
 
             # let exceptions fall through
             rcs = ResourceConfig.from_file(resource_config)
 
             for rc in rcs:
-                self._log.info("Loaded resource configurations for %s" % rc)
+                self._log.info("Loaded resource configurations for %s", rc)
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
-        else :
+        else:
             self._resource_configs [resource_config.name] = resource_config.as_dict()
+
 
     # -------------------------------------------------------------------------
     #
-    def get_resource_config (self, resource_key, schema=None):
+    def get_resource_config(self, resource_key, schema=None):
         """Returns a dictionary of the requested resource config
         """
 
-        if  resource_key in self._resource_aliases :
-            self._log.warning ("using alias '%s' for deprecated resource key '%s'" \
-                         % (self._resource_aliases[resource_key], resource_key))
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+        
+
+        if resource_key in self._resource_aliases:
+            self._log.warning("using alias '%s' for deprecated resource key '%s'",
+                              self._resource_aliases[resource_key], resource_key)
             resource_key = self._resource_aliases[resource_key]
 
-        if  resource_key not in self._resource_configs:
+        if resource_key not in self._resource_configs:
             error_msg = "Resource key '%s' is not known." % resource_key
             raise PilotException(error_msg)
 
-        resource_cfg = copy.deepcopy (self._resource_configs[resource_key])
+        resource_cfg = copy.deepcopy(self._resource_configs[resource_key])
 
-        if  not schema :
-            if 'schemas' in resource_cfg :
+        if not schema:
+            if 'schemas' in resource_cfg:
                 schema = resource_cfg['schemas'][0]
 
-        if  schema not in resource_cfg :
-            raise RuntimeError ("schema %s unknown for resource %s" \
+        if schema not in resource_cfg:
+            raise RuntimeError("schema %s unknown for resource %s" \
                              % (schema, resource_key))
 
-        for key in resource_cfg[schema] :
+        for key in resource_cfg[schema]:
             # merge schema specific resource keys into the
             # resource config
             resource_cfg[key] = resource_cfg[schema][key]
 
-
         return resource_cfg
+
+
+# ------------------------------------------------------------------------------
 

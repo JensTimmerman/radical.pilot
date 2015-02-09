@@ -104,7 +104,7 @@ if __name__ == "__main__":
     print "* Task %s (executed @ %s) state: %s, exit code: %s, started: %s, " \
           "finished: %s, output file: %s" % \
           (unit.uid, unit.execution_locations, unit.state,
-           unit.exit_code,  unit.start_time, unit.stop_time,
+           unit.exit_code,  unit.started, unit.finished,
            unit.description.output_staging[0]['target'])
 
     # Close automatically cancels the pilot(s).

@@ -10,18 +10,23 @@ from copy import deepcopy
 from radical.pilot.db import Session
 from pymongo import MongoClient
 
-# DBURL defines the MongoDB server URL and has the format mongodb://host:port.
-# For the installation of a MongoDB server, refer to the MongoDB website:
-# http://docs.mongodb.org/manual/installation/
-DBURL = os.getenv("RADICAL_PILOT_DBURL")
-if DBURL is None:
+# RADICAL_PILOT_DBURL defines the MongoDB server URL and has the format
+# mongodb://host:port/db_name
+
+RP_DBENV = os.environ.get("RADICAL_PILOT_DBURL")
+if not RP_DBENV:
     print "ERROR: RADICAL_PILOT_DBURL (MongoDB server URL) is not defined."
     sys.exit(1)
-    
-DBNAME = os.getenv("RADICAL_PILOT_TEST_DBNAME")
-if DBNAME is None:
-    print "ERROR: RADICAL_PILOT_TEST_DBNAME (MongoDB database name) is not defined."
-    sys.exit(1)
+
+RP_DBURL = ru.Url (RP_DBENV)
+if not (RP_DBURL.path and len(RP_DBURL.path) > 1):
+    RP_DBURL=ru.generate_id ('rp_test.')
+
+DBURL      = ru.URL(RP_DBURL)
+DBURL.path = None
+DBURL      = str(DBURL)
+
+DBNAME     = RP_DBURL.path.lstrip('/')
 
 
 #-----------------------------------------------------------------------------
@@ -52,7 +57,7 @@ class TestIssue169(unittest.TestCase):
     def test__issue_169_part_1(self):
         """ https://github.com/radical-cybertools/radical.pilot/issues/169
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pm = radical.pilot.PilotManager(session=session)
 
@@ -75,7 +80,7 @@ class TestIssue169(unittest.TestCase):
     def test__issue_169_part_2(self):
         """ https://github.com/radical-cybertools/radical.pilot/issues/169
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pmgr = radical.pilot.PilotManager(session=session)
         
@@ -100,8 +105,8 @@ class TestIssue169(unittest.TestCase):
         for pilot in pilots:
             try :
                 assert pilot.state == radical.pilot.DONE, "state: %s" % pilot.state
-                assert pilot.stop_time  is not None,      "time : %s" % pilot.stop_time
-                assert pilot.start_time is not None,      "time : %s" % pilot.start_time
+                assert pilot.started   is not None,       "time : %s" % pilot.started
+                assert pilot.finished  is not None,       "time : %s" % pilot.finished
             except :
                 print 'pilot: %s (%s)' % (pilot.uid, pilot.state)
                 for entry in pilot.state_history :

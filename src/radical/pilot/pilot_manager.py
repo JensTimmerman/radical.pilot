@@ -11,30 +11,84 @@
 __copyright__ = "Copyright 2013-2014, http://radical.rutgers.edu"
 __license__ = "MIT"
 
-import os
 import time
-import glob
-import copy
+import threading
+import multiprocessing
 
-from radical.pilot.states import *
-from radical.pilot.exceptions import *
+import radical.utils as ru
 
-from radical.pilot.object import Object
-from radical.pilot.controller import PilotManagerController
-from radical.pilot.compute_pilot import ComputePilot
-from radical.pilot.utils.logger import logger
-from radical.pilot.exceptions import PilotException, BadParameter
+from radical.pilot.types        import *
+from radical.pilot.states       import *
+from radical.pilot.exceptions   import *
+
+from radical.pilot.compute_pilot   import ComputePilot
+from radical.pilot.utils.logger    import logger
 from radical.pilot.resource_config import ResourceConfig
+
+# ------------------------------------------------------------------------------
+#
+# PilotManager setup
+#
+PMGR_THREADS   = 'threading'
+PMGR_PROCESSES = 'multiprocessing'
+
+PMGR_MODE      = PMGR_THREADS
+
+if PMGR_MODE == PMGR_THREADS :
+    COMPONENT_MODE = threading
+    COMPONENT_TYPE = threading.Thread
+    QUEUE_TYPE     = multiprocessing.Queue
+    LOCK_TYPE      = multiprocessing.RLock
+elif PMGR_MODE == PMGR_PROCESSES :
+    COMPONENT_MODE = multiprocessing
+    COMPONENT_TYPE = multiprocessing.Process
+    QUEUE_TYPE     = multiprocessing.Queue
+    LOCK_TYPE      = multiprocessing.RLock
+
+# component IDs
+
+PMGR                = 'PMGR'
+PMGR_LAUNCHER       = 'PMGR_Launcher'
+
+# Number of worker threads
+NUMBER_OF_WORKERS = {
+        PMGR                :   1,
+        PMGR_LAUNCHER       :   1
+}
+
+# factor by which the number of pilots are increased at a certain step.  Value of
+# '1' will leave the pilots unchanged.  Any blowup will leave on pilot as the
+# original, and will then create clones with an changed pilot ID (see blowup()).
+BLOWUP_FACTOR = {
+        PMGR                :   1,
+        PMGR_LAUNCHER       :   1
+}
+
+# flag to drop all blown-up pilots at some point in the pipeline.  The pilots
+# with the original IDs will again be left untouched, but all other pilots are
+# silently discarded.
+DROP_CLONES = {
+        PMGR                : True,
+        PMGR_LAUNCHER       : True
+}
+
+# ------------------------------------------------------------------------------
+#
+# config flags 
+#
+# FIXME: move to some RP config
+#
+rp_config = dict()
+rp_config['blowup_factor']     = BLOWUP_FACTOR
+rp_config['drop_clones']       = DROP_CLONES
+rp_config['number_of_workers'] = NUMBER_OF_WORKERS
+
 
 # -----------------------------------------------------------------------------
 #
-class PilotManager(Object):
+class PilotManager(object):
     """A PilotManager holds :class:`radical.pilot.ComputePilot` instances that are
     submitted via the :func:`radical.pilot.PilotManager.submit_pilots` method.
-
-    It is possible to attach one or more :ref:`chapter_machconf`
-    to a PilotManager to outsource machine specific configuration
-    parameters to an external configuration file.
 
     Each PilotManager has a unique identifier :data:`radical.pilot.PilotManager.uid`
     that can be used to re-connect to previoulsy created PilotManager in a
@@ -42,11 +96,10 @@ class PilotManager(Object):
 
     **Example**::
 
-        s = radical.pilot.Session(database_url=dbURL)
+        s = radical.pilot.Session()
 
-        pm1 = radical.pilot.PilotManager(session=s, resource_configurations=RESCONF)
-        # Re-connect via the 'get()' method.
-        pm2 = radical.pilot.PilotManager.get(session=s, pilot_manager_id=pm1.uid)
+        pm1 = radical.pilot.PilotManager(session=s)                # create new
+        pm2 = radical.pilot.PilotManager(session=s, uid=pm1.uid)   # reconnect
 
         # pm1 and pm2 are pointing to the same PilotManager
         assert pm1.uid == pm2.uid
@@ -54,81 +107,69 @@ class PilotManager(Object):
 
     # -------------------------------------------------------------------------
     #
-    def __init__(self, session, pilot_launcher_workers=1, _reconnect=False):
-        """Creates a new PilotManager and attaches is to the session.
-
-        .. note:: The `resource_configurations` (see :ref:`chapter_machconf`)
-                  parameter is currently mandatory for creating a new
-                  PilotManager instance.
+    def __init__(self, session, uid=None):
+        """Creates a new PilotManager and attaches it to the session.
 
         **Arguments:**
 
             * **session** [:class:`radical.pilot.Session`]:
               The session instance to use.
 
-            * **resource_configurations** [`string` or `list of strings`]:
-              A list of URLs pointing to :ref:`chapter_machconf`. Currently
-              `file://`, `http://` and `https://` URLs are supported.
-
-              If one or more resource_configurations are provided, Pilots
-              submitted  via this PilotManager can access the configuration
-              entries in the  files via the :class:`ComputePilotDescription`.
-              For example::
-
-                  pm = radical.pilot.PilotManager(session=s)
-
-                  pd = radical.pilot.ComputePilotDescription()
-                  pd.resource = "futuregrid.india"  # defined in futuregrid.json
-                  pd.cores    = 16
-                  pd.runtime  = 5 # minutes
-
-                  pilot = pm.submit_pilots(pd)
-
-            * pilot_launcher_workers (`int`): The number of pilot launcher 
-              worker processes to start in the background. 
-
-        .. note:: `pilot_launcher_workers` can be used to tune RADICAL-Pilot's 
-                  performance. However, you should only change the default values 
-                  if you know what you are doing.
+            * uid (`string`): If a PilotManager id is given, the backend is
+              searched for an existing instance to reconnect to.
 
         **Returns:**
 
             * A new `PilotManager` object [:class:`radical.pilot.PilotManager`].
-
-        **Raises:**
-            * :class:`radical.pilot.PilotException`
         """
-        self._session = session
-        self._worker = None
-        self._uid = None
 
-        if _reconnect == True:
-            return
+        COMPONENT_TYPE.__init__(self)
 
-        ###############################
-        # Create a new pilot manager. #
-        ###############################
+        self._session       = session
+        self._log           = session._log
+        self._updater       = session._updater
 
-        # Start a worker process fo this PilotManager instance. The worker
-        # process encapsulates database access, persitency et al.
-        self._worker = PilotManagerController(
-            pilot_manager_uid=None,
-            pilot_manager_data={},
-            pilot_launcher_workers=pilot_launcher_workers, 
-            session=self._session,
-            db_connection=session._dbs,
-            db_connection_info=session._connection_info)
-        self._worker.start()
+        # set up internal state
+        self._state          = ACTIVE
+        self._callbacks      = dict()
+        self._pilots         = list()  # dict?
+        self._worker_list    = list()
 
-        self._uid = self._worker.pilot_manager_uid
+        if uid :
+            # FIXME: re-implement reconnect.  Basically need to dig out the
+            # pilot handles...
+            self._uid = uid
 
-        # Each pilot manager has a worker thread associated with it. The task
-        # of the worker thread is to check and update the state of pilots, fire
-        # callbacks and so on.
+        else :
+            self._uid = ru.generate_id('pmgr.%(counter)02d', ru.ID_CUSTOM)
+
+        # register with session for shutdown
+        # FIXME: should session be a factory after all?
         self._session._pilot_manager_objects.append(self)
-        self._session._process_registry.register(self._uid, self._worker)
 
-    #--------------------------------------------------------------------------
+        # we want to own all queues -- that simplifies startup and shutdown
+        self._pmgr_launcher_queue = QUEUE_TYPE()
+
+        # spawn the pilot launcher
+        for n in range(rp_config['number_of_workers'][PMGR_LAUNCHER]):
+            worker = PMGR_Launcher(
+                name                      = "PMGR-Launcher-%d" % n,
+                config                    = rp_config, 
+                logger                    = self._log,
+                session                   = self._session,
+                pmgr_launcher_queue       = self._pmgr_launcher_queue)
+            self._worker_list.append(worker)
+
+
+        # FIXME: also spawn a separate thread/process to pull for state updates
+        # from mongodb, and to issue callbacks etc from there.  This will need
+        # to be replaced with some queue, eventually -- for now we pull :/
+        # coordinate actions with worker thread/process
+        self._lock = LOCK_TYPE()
+        self.start ()
+
+
+    # -------------------------------------------------------------------------
     #
     def close(self, terminate=True):
         """Shuts down the PilotManager and its background workers in a 
@@ -137,156 +178,81 @@ class PilotManager(Object):
         **Arguments:**
 
             * **terminate** [`bool`]: If set to True, all active pilots will 
-              get canceled (default: False).
+              be canceled (default: False).
 
         """
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
 
         logger.debug("pmgr    %s closing" % (str(self._uid)))
 
-        # Spit out a warning in case the object was already closed.
-        if not self._uid:
-            logger.error("PilotManager object already closed.")
-            return
-
-        # before we terminate pilots, we have to kill the pilot launcher threads
-        # -- otherwise we'll run into continous race conditions due to the
-        # ongoing state checks...
-        if self._worker is not None:
-            # Stop the worker process
-            logger.debug("pmgr    %s cancel   worker %s" % (str(self._uid), self._worker.name))
-            self._worker.cancel_launcher()
-            logger.debug("pmgr    %s canceled worker %s" % (str(self._uid), self._worker.name))
-
-
-
-        # If terminate is set, we cancel all pilots. 
+        # if terminate is set, we cancel all pilots. 
         if  terminate :
-            # cancel all pilots, make sure they are gone, and close the pilot
-            # managers.
-            for pilot in self.get_pilots () :
-                logger.debug("pmgr    %s cancels  pilot  %s" % (str(self._uid), pilot._uid))
-            self.cancel_pilots ()
 
-          # FIXME:
-          #
-          # wait_pilots() will wait until all pilots picked up the sent cancel
-          # signal and died.  However, that can take a loooong time.  For
-          # example, if a pilot is in 'PENDING_ACTIVE' state, this will have to
-          # wait until the pilot is bootstrapped, started, connected to the DB,
-          # and shut down again.  Or, for a pilot which just got a shitload of
-          # units, it will have to wait until the pilot started all those units
-          # and then checks its command queue again.  Or, if the pilot job
-          # already died, wait will block until the state checker kicks in and
-          # declares the pilot as dead, which takes a couple of minutes.
-          #
-          # Solution would be to add a CANCELING state and to wait for that one,
-          # too, which basically means to wait until the cancel signal has been
-          # sent.  There is not much more to do at this point anyway.  This is at
-          # the moment faked in the manager controler, which sets that state
-          # after sending the cancel command.  This should be converted into
-          # a proper state -- that would, btw, remove the need for a cancel
-          # command in the first place, as the pilot can just pull its own state
-          # instead, and cancel on CANCELING...
-          #
-          # self.wait_pilots ()
-            wait_for_cancel = True
-            all_pilots = self.get_pilots ()
-            while wait_for_cancel :
-                wait_for_cancel = False
-                for pilot in all_pilots :
-                    logger.debug("pmgr    %s wait for pilot  %s (%s)" % (str(self._uid), pilot._uid, pilot.state))
-                    if  pilot.state not in [DONE, FAILED, CANCELED] :
-                        time.sleep (1)
-                        wait_for_cancel = True
-                        break
-            for pilot in self.get_pilots () :
-                logger.debug("pmgr    %s canceled pilot  %s" % (str(self._uid), pilot._uid))
+            to_cancel = [pilot.uid for pilot in self._pilots if pilot.state not in FINAL]
 
+            for pid in to_cancel:
+                logger.debug("pmgr    %s cancel   pilot  %s" % (str(self._uid), pilot._uid))
 
-        logger.debug("pmgr    %s stops    worker %s" % (str(self._uid), self._worker.name))
-        self._worker.stop()
-        self._worker.join()
-        logger.debug("pmgr    %s stopped  worker %s" % (str(self._uid), self._worker.name))
+            self.cancel_pilots(to_cancel)
+            states = self.wait_pilots(to_cancel, timeout=10)
 
-        # Remove worker from registry
-        self._session._process_registry.remove(self._uid)
+            for state,pilot in zip(states, self._pilots):
+                if state not in FINAL :
+                    logger.warning("pmgr    %s ignore   pilot  %s (%s)" % (str(self._uid), pilot._uid, state))
 
+        # drop object references
+        self._pilots = list()
 
+        # stop all threads etc
+        for worker in self._worker_list:
+            worker.stop()
+
+        self.stop()
+
+        # also send a wakeup signals through all queues
+        self._pmgr_launcher_queue.put(None)
+
+        # bye bye Junimond...
+        self._state = CANCELED
         logger.debug("pmgr    %s closed" % (str(self._uid)))
-        self._uid = None
 
-    #--------------------------------------------------------------------------
-    #
-    @classmethod
-    def _reconnect(cls, session, pilot_manager_id):
-        """PRIVATE: reconnect to an existing pilot manager.
-        """
-        uid_exists = PilotManagerController.uid_exists(
-            db_connection=session._dbs,
-            pilot_manager_uid=pilot_manager_id
-        )
-
-        if not uid_exists:
-            raise BadParameter(
-                "PilotManager with id '%s' not in database." % pilot_manager_id)
-
-        obj = cls(session=session, _reconnect=True)
-        obj._uid = pilot_manager_id
-
-        # Retrieve or start a worker process fo this PilotManager instance.
-        worker = session._process_registry.retrieve(pilot_manager_id)
-        if worker is not None:
-            obj._worker = worker
-        else:
-            obj._worker = PilotManagerController(
-                pilot_manager_uid=pilot_manager_id,
-                pilot_manager_data={},
-                session=session,
-                db_connection=session._dbs,
-                db_connection_info=session._connection_info)
-            session._process_registry.register(pilot_manager_id, obj._worker)
-
-        # start the worker if it's not already running
-        if obj._worker.is_alive() is False:
-            obj._worker.start()
-
-        return obj
-
-    # -------------------------------------------------------------------------
-    #
-    def as_dict(self):
-        """Returns a Python dictionary representation of the object.
-        """
-        self._assert_obj_is_valid()
-
-        object_dict = {
-            'uid': self.uid
-        }
-        return object_dict
 
     # -------------------------------------------------------------------------
     #
     def __str__(self):
-        """Returns a string representation of the object.
-        """
-        return str(self.as_dict())
+
+        return self._uid
+
+
+    # -------------------------------------------------------------------------
+    #
+    @property
+    def uid(self):
+
+        return self._uid
+
 
     # -------------------------------------------------------------------------
     #
     def submit_pilots(self, pilot_descriptions):
         """Submits a new :class:`radical.pilot.ComputePilot` to a resource.
 
+        **Arguments:**
+
+            * **pilot_descriptions** [:class:`radical.pilot.ComputePilotDescription`
+              or list of :class:`radical.pilot.ComputePilotDescription`]: The
+              description of the compute pilot instance(s) to create.
+
         **Returns:**
 
             * One or more :class:`radical.pilot.ComputePilot` instances
               [`list of :class:`radical.pilot.ComputePilot`].
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
-        # Check if the object instance is still valid.
-        self._assert_obj_is_valid()
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
 
         # Implicit list conversion.
         return_list_type = True
@@ -295,33 +261,28 @@ class PilotManager(Object):
             pilot_descriptions = [pilot_descriptions]
 
         # Itereate over the pilot descriptions, try to create a pilot for
-        # each one and append it to 'pilot_obj_list'.
-        pilot_obj_list = list()
+        # each one
+        pilots = list()
 
         for pilot_description in pilot_descriptions:
 
-            if pilot_description.resource is None:
-                error_msg = "ComputePilotDescription does not define mandatory attribute 'resource'."
-                raise BadParameter(error_msg)
+            if not pilot_description.resource:
+                raise BadParameter("ComputePilotDescription must define 'resource'.")
 
-            elif pilot_description.runtime is None:
-                error_msg = "ComputePilotDescription does not define mandatory attribute 'runtime'."
-                raise BadParameter(error_msg)
+            if not pilot_description.runtime:
+                raise BadParameter("ComputePilotDescription must define 'runtime'.")
 
-            elif pilot_description.cores is None:
-                error_msg = "ComputePilotDescription does not define mandatory attribute 'cores'."
-                raise BadParameter(error_msg)
+            if not pilot_description.cores:
+                raise BadParameter("ComputePilotDescription must define 'cores'.")
 
             resource_key = pilot_description.resource
             resource_cfg = self._session.get_resource_config(resource_key)
 
             # Check resource-specific mandatory attributes
-            if "mandatory_args" in resource_cfg:
-                for ma in resource_cfg["mandatory_args"]:
-                    if getattr(pilot_description, ma) is None:
-                        error_msg = "ComputePilotDescription does not define attribute '{0}' which is required for '{1}'.".format(ma, resource_key)
-                        raise BadParameter(error_msg)
-
+            for arg in resource_cfg.get ("mandatory_args", []):
+                if not pilot_description[arg] :
+                    raise BadParameter("ComputePilotDescription must define"
+                            " '%s' for resource '%s'" % (arg, resource_key))
 
             # we expand and exchange keys in the resource config, depending on
             # the selected schema so better use a deep copy...
@@ -350,35 +311,38 @@ class PilotManager(Object):
 
             # If 'default_sandbox' is defined, set it.
             if pilot_description.sandbox is not None:
-                if "valid_roots" in resource_cfg and resource_cfg["valid_roots"] is not None:
+                if resource_cfg.get("valid_roots"):
                     is_valid = False
                     for vr in resource_cfg["valid_roots"]:
                         if pilot_description.sandbox.startswith(vr):
                             is_valid = True
-                    if is_valid is False:
-                        raise BadParameter("Working directory for resource '%s' defined as '%s' but needs to be rooted in %s " % (resource_key, pilot_description.sandbox, resource_cfg["valid_roots"]))
+                            break
+                    if not is_valid:
+                        raise BadParameter("Working directory for resource '%s' "
+                                "defined as '%s' but needs to be rooted in %s " \
+                                % (resource_key, pilot_description.sandbox, 
+                                   resource_cfg["valid_roots"]))
 
             # After the sanity checks have passed, we can register a pilot
             # startup request with the worker process and create a facade
             # object.
 
-            pilot = ComputePilot.create(
-                pilot_description=pilot_description,
-                pilot_manager_obj=self)
+            pilot = ComputePilot(description=pilot_description, pmgr=self)
 
-            pilot_uid = self._worker.register_start_pilot_request(
-                pilot=pilot,
-                resource_config=resource_cfg)
+            # TODO: publish pilots in DB
 
-            pilot._uid = pilot_uid
+            # resource_config=resource_cfg)
 
-            pilot_obj_list.append(pilot)
+            pilots.append(pilot)
 
-        # Implicit return value conversion
-        if  return_list_type :
-            return pilot_obj_list
-        else:
-            return pilot_obj_list[0]
+
+        with self._lock:
+            self._pilots += pilots
+
+
+        if return_list_type : return pilots
+        else                : return pilots[0]
+
 
     # -------------------------------------------------------------------------
     #
@@ -389,25 +353,22 @@ class PilotManager(Object):
         **Returns:**
 
             * A list of :class:`radical.pilot.ComputePilot` uids [`string`].
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
-        # Check if the object instance is still valid.
-        self._assert_obj_is_valid()
 
-        # Get the pilot list from the worker
-        return self._worker.list_pilots()
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        return [pilot.uid for pilot in self._pilots]
+
 
     # -------------------------------------------------------------------------
     #
     def get_pilots(self, pilot_ids=None):
-        """Returns one or more :class:`radical.pilot.ComputePilot` instances.
+        """Returns one or more :class:`radical.pilot.ComputePilot` instances  identified by their IDs.
 
         **Arguments:**
 
-            * **pilot_uids** [`list of strings`]: If pilot_uids is set,
+            * **pilot_uids** [string or`list of strings`]: If pilot_uids is set,
               only the Pilots with  the specified uids are returned. If
               pilot_uids is `None`, all Pilots are returned.
 
@@ -415,36 +376,38 @@ class PilotManager(Object):
 
             * A list of :class:`radical.pilot.ComputePilot` objects
               [`list of :class:`radical.pilot.ComputePilot`].
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
-        self._assert_obj_is_valid()
 
-        
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        if not pilot_ids:
+            return self._pilots[:]
+
         return_list_type = True
-        if (not isinstance(pilot_ids, list)) and (pilot_ids is not None):
+        if not isinstance(pilot_ids, list):
             return_list_type = False
             pilot_ids = [pilot_ids]
 
-        pilots = ComputePilot._get(pilot_ids=pilot_ids, pilot_manager_obj=self)
+        pilots = [pilot for pilot in self._pilots if pilot.uid in pilot_ids]
 
-        if  return_list_type :
-            return pilots
-        else :
-            return pilots[0]
+        if return_list_type : return pilots
+        else                : return pilots[0]
+
 
     # -------------------------------------------------------------------------
     #
-    def wait_pilots(self, pilot_ids=None,
-                    state=[DONE, FAILED, CANCELED],
-                    timeout=None):
+    def wait_pilots(self, pilot_ids=None, state=None, timeout=None):
         """Returns when one or more :class:`radical.pilot.ComputePilots` reach a
         specific state or when an optional timeout is reached.
 
-        If `pilot_uids` is `None`, `wait_pilots` returns when **all** Pilots
-        reach the state defined in `state`.
+        If `pilot_uids` is `None`, `wait_pilots` returns when **all**
+        ComputePilots reach the state defined in `state`, or have progressed
+        beyond that state.
+
+        **Example**::
+
+            # TODO -- add example
 
         **Arguments:**
 
@@ -468,53 +431,76 @@ class PilotManager(Object):
               Optional timeout in seconds before the call returns regardless
               whether the Pilots have reached the desired state or not.
               The default value **-1.0** never times out.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
-        self._assert_obj_is_valid()
+
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        state_values = {NEW               : 0,
+                        LAUNCHING_PENDING : 1,
+                        LAUNCHING         : 2,
+                        ACTIVE_PENDING    : 3,
+                        ACTIVE            : 4,
+                        DONE              : 5,
+                        FAILED            : 5,
+                        CANCELED          : 5}
+
+        if not state:
+            state = [DONE, FAILED, CANCELED]
 
         if not isinstance(state, list):
             state = [state]
 
         return_list_type = True
-        if (not isinstance(pilot_ids, list)) and (pilot_ids is not None):
-            return_list_type = False
-            pilot_ids = [pilot_ids]
+        if not pilot_ids :
+            pilots = self._pilots
+        else :
+            if not isinstance(pilot_ids, list):
+                return_list_type = False
+                pilots = self.get_pilots ([pilot_ids])
+            else:
+                pilots = self.get_pilots (pilot_ids)
 
+        # we don't need to check pilots over and over again, once they satisfy
+        # the state condition -- so keep a check list and reduce it over time
+        checklist = pilots[:]
 
         start  = time.time()
-        all_ok = False
         states = list()
 
-        while not all_ok :
-
-            pilots = self._worker.get_compute_pilot_data(pilot_ids=pilot_ids)
-            all_ok = True
-            states = list()
-
-            for pilot in pilots :
-                if  pilot['state'] not in state :
-                    all_ok = False
-
-                states.append (pilot['state'])
+        while True :
 
             # check timeout
-            if  (None != timeout) and (timeout <= (time.time() - start)):
-                if  not all_ok :
-                    logger.debug ("wait timed out: %s" % states)
-                break
+            if  timeout and (timeout <= (time.time()-start)):
+                logger.debug ("wait timed out: %s" % states)
 
-            # sleep a little if this cycle was idle
-            if  not all_ok :
-                time.sleep (0.1)
+                if return_list_type : return [pilot.state for pilot in pilots]
+                else                : return pilots[0].state
 
-        # done waiting
-        if  return_list_type :
-            return states
-        else :
-            return states[0]
+            # sleep a little if previous cycle was idle
+            time.sleep (0.1)
+
+            # check pilot states
+            all_ok = True
+            for pilot in checklist[:] :
+                
+                pilot_ok    = False
+                pilot_state = pilot.state
+                
+                for s in state:
+                    if  state_values(pilot_state) >= state_values(s):
+                        pilot_ok = True
+                        checklist.remove(pilot) # don't check this one anymore...
+                        break
+
+                if not pilot_ok :
+                    all_ok = False
+                    break
+
+            if all_ok:
+                # did not see a 'not pilot_ok', so declare success!
+                if return_list_type : return [pilot.state for pilot in pilots]
+                else                : return pilots[0].state
 
 
     # -------------------------------------------------------------------------
@@ -527,38 +513,62 @@ class PilotManager(Object):
             * **pilot_uids** [`string` or `list of strings`]
               If pilot_uids is set, only the Pilots with the specified uids are
               canceled. If pilot_uids is `None`, all Pilots are canceled.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
         # Check if the object instance is still valid.
-        self._assert_obj_is_valid()
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
 
-        # Implicit list conversion.
-        if (not isinstance(pilot_ids, list)) and (pilot_ids is not None):
-            pilot_ids = [pilot_ids]
+        pilots = self.get_pilots (pilot_ids)
 
-        # Register the cancelation request with the worker.
-        self._worker.register_cancel_pilots_request(pilot_ids=pilot_ids)
+        # FIXME:
+        # cancelling pilots needs two actions:
+        #   - setting the state in the DB to CANCELLED
+        #   - sending CANCEL_PILOT commands to all components downstream of 
+        #     the current units. Whoever receives the cancel call will simply 
+        #     drop the pilot.
+
+        for pilot in pilots:
+            pilot.cancel()
 
 
     # -------------------------------------------------------------------------
     #
-    def register_callback(self, callback_function, callback_data=None):
+    def register_callback(self, callback_function, metric=PILOT_STATE, callback_data=None):
         """Registers a new callback function with the PilotManager.
-        Manager-level callbacks get called if any of the ComputePilots managed
-        by the PilotManager change their state.
+        Manager-level callbacks get called if the specified metric changes.  The
+        metric `PILOT_STATE` fires the callback if any of the ComputePilots
+        managed by the PilotManager change their state.
 
         All callback functions need to have the same signature::
 
-            def callback_func(obj, state, data)
+            def callback_func(obj, value, data)
 
         where ``object`` is a handle to the object that triggered the callback,
-        ``state`` is the new state of that object, and ``data`` are the data
-        passed on callback registration.
-        """
-        self._assert_obj_is_valid()
+        ``value`` is the metric, and ``data`` is the data provided on
+        callback registration.  In the example of `PILOT_STATE` above, the
+        object would be the pilot in question, and the value would be the new
+        state of the pilot.
 
-        self._worker.register_manager_callback(callback_function, callback_data)
+        Available metrics are:
+
+          * `PILOT_STATE`: fires when the state of any of the pilots which are
+            managed by this pilot manager instance is changing.  It communicates
+            the pilot object instance and the pilot's new state.
+
+        """
+        if self._state in FINAL:
+            raise IncorrectState(msg="Invalid object instance.")
+
+        if  metric not in PILOT_MANAGER_METRICS :
+            raise ValueError ("Metric '%s' is not available on the pilot manager" % metric)
+
+        with self._lock :
+
+            if not metric in self._callbacks :
+                self._callbacks[metric] = list()
+
+            self._callbacks[metric].append (callback_function, callback_state)
+
+
+# ------------------------------------------------------------------------------
 

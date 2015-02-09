@@ -122,7 +122,7 @@ if __name__ == "__main__":
             units = [units]
         for unit in units:
             print "* Task %s - state: %s, exit code: %s, started: %s, finished: %s, stdout: %s" \
-                % (unit.uid, unit.state, unit.exit_code, unit.start_time, unit.stop_time, "n.a.")
+                % (unit.uid, unit.state, unit.exit_code, unit.started, unit.finished, "n.a.")
 
         session.close(cleanup=False)
         sys.exit(0)

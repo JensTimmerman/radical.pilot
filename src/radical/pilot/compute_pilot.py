@@ -122,9 +122,9 @@ class ComputePilot (object):
             'log':             self.log,
             'sandbox':         self.sandbox,
             'resource':        self.resource,
-            'submission_time': self.submission_time,
-            'start_time':      self.start_time,
-            'stop_time':       self.stop_time,
+            'submitted':       self.submitted,
+            'started':      self.started,
+            'finished':       self.finished,
             'resource_detail': self.resource_detail
         }
         return obj_dict
@@ -327,7 +327,7 @@ class ComputePilot (object):
     # -------------------------------------------------------------------------
     #
     @property
-    def submission_time(self):
+    def submitted(self):
         """ Returns the time the pilot was submitted.
         """
         # Check if this instance is valid
@@ -340,7 +340,7 @@ class ComputePilot (object):
     # -------------------------------------------------------------------------
     #
     @property
-    def start_time(self):
+    def started(self):
         """ Returns the time the pilot was started on the backend.
         """
         if not self._uid:
@@ -352,7 +352,7 @@ class ComputePilot (object):
     # -------------------------------------------------------------------------
     #
     @property
-    def stop_time(self):
+    def finished(self):
         """ Returns the time the pilot was stopped.
         """
         if not self._uid:

@@ -9,7 +9,7 @@ import multiprocessing
 from radical.pilot.states import *
 from radical.pilot.utils  import prof, blowup
 
-from radical.pilot.update_worker import UpdateWorker
+from radical.pilot.updater import UnitUpdater
 
 # ------------------------------------------------------------------------------
 #
@@ -250,21 +250,21 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
             if cu['UMGR_Staging_Input_Directives'] :
                 prof('push', msg="towards umgr staging input", uid=_cu['_id'])
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = UMGR_STAGING_INPUT_PENDING)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = UMGR_STAGING_INPUT_PENDING)
                 self._umgr_staging_input_queue.put(_cu)
 
             elif cu['Agent_Staging_Input_Directives'] :
                 prof('push', msg="towards agent staging input", uid=_cu['_id'])
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = AGENT_STAGING_INPUT_PENDING)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = AGENT_STAGING_INPUT_PENDING)
             else :
                 prof('push', msg="towards agent scheduling", uid=_cu['_id'])
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = AGENT_SCHEDULING_PENDING)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = AGENT_SCHEDULING_PENDING)
 
         return True
 
@@ -352,9 +352,9 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
                     cu = data
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = UMGR_SCHEDULING)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = UMGR_SCHEDULING)
 
                     # we got a new unit to schedule.  Either we can place 
                     # it straight away and move it to execution, or we have
@@ -371,8 +371,8 @@ class UMGR_Scheduler(COMPONENT_TYPE):
 
                     cu = data
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu)
 
                     # we got a finished unit, and can re-use its cores
                     #

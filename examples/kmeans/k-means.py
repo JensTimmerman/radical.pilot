@@ -70,7 +70,7 @@ def get_distance(dataPointX, dataPointY, centroidX, centroidY):
 
 def main():
     try:
-        start_time = time.time()
+        started = time.time()
         #----------FUNCTIONS OF RADICAL PILOT -------------------#
         # here we create a new radical session
         session = radical.pilot.Session()
@@ -304,7 +304,7 @@ def main():
         
         #--------------------END OF K-MEANS ALGORITHM --------------------------#
         finish_time = time.time()
-        total_time = finish_time - start_time  # total execution time
+        total_time = finish_time - started  # total execution time
         print 'The total execution time is: %f seconds' % total_time
         total_time /= 60
         print 'Which is: %f minutes' % total_time

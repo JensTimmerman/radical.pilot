@@ -11,7 +11,7 @@ import multiprocessing
 import saga.filesystem as sfs
 
 from   radical.pilot.states             import *
-from   radical.pilot.update_worker      import UpdateWorker
+from   radical.pilot.updater            import UnitUpdater
 from   radical.pilot.staging_directives import CREATE_PARENTS
 
 # ------------------------------------------------------------------------------
@@ -88,23 +88,23 @@ class UMGR_Staging_Output(COMPONENT_TYPE):
 
             try:
 
-                cu = self._umgr_staging_output_queue.get()
+                c = self._umgr_staging_output_queue.get()
 
                 if not cu:
                     continue
 
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = UMGR_STAGING_OUTPUT)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = UMGR_STAGING_OUTPUT)
 
               # cu_list = rpu.blowup(cu, UMGR_STAGING_OUTPUT) 
 
                 try:
                     self._handle_unit(cu)
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = DONE)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = DONE)
 
                 except Exception as e:
 
@@ -113,10 +113,10 @@ class UMGR_Staging_Output(COMPONENT_TYPE):
                     self._log.exception(msg)
 
                     # If a staging directive fails, fail the CU also.
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = FAILED,
-                                             msg   = msg)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = FAILED,
+                                            msg   = msg)
 
             except Exception as e:
                 self._log.exception('%s died', self.name)

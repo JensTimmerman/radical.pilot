@@ -34,9 +34,18 @@ STAGING_AREA     = 'staging_area'
 
 #-----------------------------------------------------------------------------
 #
+def expand_staging_directives(unit_description, logger):
+    """expand all staging directives for a unit description
+    """
+
+    ud.input_staging  = expand_staging_directive (ud.input_staging)
+    ud.output_staging = expand_staging_directive (ud.output_staging)
+
+
+#-----------------------------------------------------------------------------
+#
 def expand_staging_directive(staging_directive, logger):
     """Take an abbreviated or compressed staging directive and expand it.
-
     """
 
     if not staging_directive :

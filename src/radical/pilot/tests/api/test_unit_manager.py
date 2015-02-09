@@ -11,18 +11,23 @@ from copy import deepcopy
 from radical.pilot.db import Session
 from pymongo import MongoClient
 
-# DBURL defines the MongoDB server URL and has the format mongodb://host:port.
-# For the installation of a MongoDB server, refer to the MongoDB website:
-# http://docs.mongodb.org/manual/installation/
-DBURL = os.getenv("RADICAL_PILOT_DBURL")
-if DBURL is None:
+# RADICAL_PILOT_DBURL defines the MongoDB server URL and has the format
+# mongodb://host:port/db_name
+
+RP_DBENV = os.environ.get("RADICAL_PILOT_DBURL")
+if not RP_DBENV:
     print "ERROR: RADICAL_PILOT_DBURL (MongoDB server URL) is not defined."
     sys.exit(1)
-    
-DBNAME = os.getenv("RADICAL_PILOT_TEST_DBNAME")
-if DBNAME is None:
-    print "ERROR: RADICAL_PILOT_TEST_DBNAME (MongoDB database name) is not defined."
-    sys.exit(1)
+
+RP_DBURL = ru.Url (RP_DBENV)
+if not (RP_DBURL.path and len(RP_DBURL.path) > 1):
+    RP_DBURL=ru.generate_id ('rp_test.')
+
+DBURL      = ru.URL(RP_DBURL)
+DBURL.path = None
+DBURL      = str(DBURL)
+
+DBNAME     = RP_DBURL.path.lstrip('/')
 
 
 #-----------------------------------------------------------------------------
@@ -54,7 +59,7 @@ class TestUnitManager(unittest.TestCase):
     def test__unitmanager_create(self):
         """ Test if unit manager creation works as expected.
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         assert session.list_unit_managers() == [], "Wrong number of unit managers"
 
@@ -71,7 +76,7 @@ class TestUnitManager(unittest.TestCase):
     def test__unitmanager_reconnect(self):
         """ Test if unit manager reconnection works as expected.
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         um = radical.pilot.UnitManager(session=session, scheduler='round_robin')
         assert session.list_unit_managers() == [um.uid], "Wrong list of unit managers"
@@ -88,7 +93,7 @@ class TestUnitManager(unittest.TestCase):
     def test__unitmanager_pilot_assoc(self):
         """ Test if unit manager <-> pilot association works as expected. 
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pm = radical.pilot.PilotManager(session=session)
 

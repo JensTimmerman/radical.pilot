@@ -154,7 +154,7 @@ try:
     
     for unit in units:
         print "* Task %s (executed @ %s) state %s, exit code: %s, started: %s, finished: %s" \
-            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.start_time, unit.stop_time)
+            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.started, unit.finished)
 
     # Close automatically cancels the pilot(s).
     pmgr.cancel_pilots ()

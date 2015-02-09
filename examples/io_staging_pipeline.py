@@ -37,8 +37,8 @@ def unit_state_cb (unit, state) :
                     unit.execution_locations, 
                     unit.state, 
                     unit.exit_code, 
-                    unit.start_time, 
-                    unit.stop_time, 
+                    unit.started, 
+                    unit.finished, 
                     unit.stdout,
                     unit.stderr)
 

@@ -112,7 +112,7 @@ if __name__ == "__main__":
 
     for unit in units:
         print "* Task %s - state: %s, exit code: %s, started: %s, finished: %s, stdout: %s" \
-            % (unit.uid, unit.state, unit.exit_code, unit.start_time, unit.stop_time, unit.stdout)
+            % (unit.uid, unit.state, unit.exit_code, unit.started, unit.finished, unit.stdout)
         
         assert (unit.state == rp.DONE)
         assert ('mpi rank 0/4' in unit.stdout)

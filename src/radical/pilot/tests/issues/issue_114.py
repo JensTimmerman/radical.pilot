@@ -10,18 +10,23 @@ from copy import deepcopy
 from radical.pilot.db import Session
 from pymongo import MongoClient
 
-# DBURL defines the MongoDB server URL and has the format mongodb://host:port.
-# For the installation of a MongoDB server, refer to the MongoDB website:
-# http://docs.mongodb.org/manual/installation/
-DBURL = os.getenv("RADICAL_PILOT_DBURL")
-if DBURL is None:
+# RADICAL_PILOT_DBURL defines the MongoDB server URL and has the format
+# mongodb://host:port/db_name
+
+RP_DBENV = os.environ.get("RADICAL_PILOT_DBURL")
+if not RP_DBENV:
     print "ERROR: RADICAL_PILOT_DBURL (MongoDB server URL) is not defined."
     sys.exit(1)
-    
-DBNAME = os.getenv("RADICAL_PILOT_TEST_DBNAME")
-if DBNAME is None:
-    print "ERROR: RADICAL_PILOT_TEST_DBNAME (MongoDB database name) is not defined."
-    sys.exit(1)
+
+RP_DBURL = ru.Url (RP_DBENV)
+if not (RP_DBURL.path and len(RP_DBURL.path) > 1):
+    RP_DBURL=ru.generate_id ('rp_test.')
+
+DBURL      = ru.URL(RP_DBURL)
+DBURL.path = None
+DBURL      = str(DBURL)
+
+DBNAME     = RP_DBURL.path.lstrip('/')
 
 
 #-----------------------------------------------------------------------------
@@ -52,7 +57,7 @@ class TestIssue114(unittest.TestCase):
     def test__issue_114_part_1(self):
         """ https://github.com/radical-cybertools/radical.pilot/issues/114
         """
-        session = rp.Session(database_url=DBURL, database_name=DBNAME)
+        session = rp.Session(database_url=DBURL)
 
         pm = rp.PilotManager(session=session)
 
@@ -104,7 +109,7 @@ class TestIssue114(unittest.TestCase):
     def test__issue_114_part_2(self):
         """ https://github.com/radical-cybertools/radical.pilot/issues/114
         """
-        session = rp.Session(database_url=DBURL, database_name=DBNAME)
+        session = rp.Session(database_url=DBURL)
 
         pm  = rp.PilotManager(session=session)
 
@@ -153,7 +158,7 @@ class TestIssue114(unittest.TestCase):
     def test__issue_114_part_3(self):
         """ https://github.com/radical-cybertools/radical.pilot/issues/114
         """
-        session = rp.Session(database_url=DBURL, database_name=DBNAME)
+        session = rp.Session(database_url=DBURL)
 
         pm = rp.PilotManager(session=session)
 

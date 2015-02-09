@@ -94,7 +94,7 @@ if __name__ == "__main__":
 
     for unit in units:
         print "* Task %s - state: %s, exit code: %s, started: %s, finished: %s" \
-            % (unit.uid, unit.state, unit.exit_code, unit.start_time, unit.stop_time)
+            % (unit.uid, unit.state, unit.exit_code, unit.started, unit.finished)
 
     session.close()
 

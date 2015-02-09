@@ -164,7 +164,7 @@ class FloodingScheduler(Scheduler):
                     # the pilot which owned this CU should now have free slots available
                     # FIXME: how do I get the pilot from the CU?
                     
-                    pid = unit.execution_details.get ('pilot', None)
+                    pid = unit._data['pilot']
 
                     if  not pid :
                         raise RuntimeError ('cannot handle final unit %s w/o pilot information' % uid)

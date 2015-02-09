@@ -21,9 +21,9 @@ AGENT_MODE     = AGENT_THREADED
 
 # ==============================================================================
 #
-class UpdateWorker(threading.Thread):
+class UnitUpdater(threading.Thread):
     """
-    An UpdateWorker pushes CU and Pilot state updates to mongodb.  Its instances
+    An UnitUpdater pushes CU state updates to mongodb.  Its instances
     compete for update requests on the update_queue.  Those requests will be
     triplets of collection name, query dict, and update dict.  Update requests
     will be collected into bulks over some time (bulk_collection_time), to
@@ -32,21 +32,20 @@ class UpdateWorker(threading.Thread):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, config, logger, agent, session_id,
-                 update_queue, mongodb_url, mongodb_name, mongodb_auth):
+    def __init__(self, name, config, logger, session_id, update_queue, dburl):
 
         threading.Thread.__init__(self)
 
         self.name           = name
         self._config        = config
         self._log           = logger
-        self._agent         = agent
         self._session_id    = session_id
         self._update_queue  = update_queue
         self._terminate     = threading.Event()
 
-        self._mongo_db      = get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
         self._cinfo         = dict()  # collection cache
+
+        _, self._mongo_db, _, _, _ = ru.mongodb_connect (dburl)
 
         # run worker thread
         self.start()
@@ -79,6 +78,8 @@ class UpdateWorker(threading.Thread):
 
                     res  = cinfo['bulk'].execute()
                     self._log.debug("bulk update result: %s", res)
+
+                    # FIXME: eval res
 
                     prof('unit update bulk pushed (%d)' % len(cinfo['uids'].keys ()))
                     for uid in cinfo['uids']:
@@ -148,6 +149,140 @@ class UpdateWorker(threading.Thread):
                 self._log.exception("unit update failed (%s)", e)
                 # FIXME: should we fail the pilot at this point?
                 # FIXME: Are the strategies to recover?
+
+
+    # --------------------------------------------------------------------------
+    #
+    # insert_session, get_session and delete_session are not enacted over the
+    # updater queue -- (insert/get need to happen before the updater thread(s) attach
+    # to the database)
+    #
+    @staticmethod
+    def insert_session(dburl, sid, config):
+
+        now = timestamp ()
+
+        prof('session insert', msg='start')
+
+        mongo, db, dbname, pname, cname = ru.mongodb_connect (dburl)
+
+        if  db[sid].count() != 0 :
+            raise ValueError ("Session '%s' already exists." % sid)
+
+        s = db["%s" % sid]
+        s.insert({'_id'          : sid,
+                 'config'        : config,
+                 'umgr'          : list(),
+                 'pmgr'          : list(),
+                 'created'       : True,
+                 'modified'      : True, 
+                 'deleted'       : False})
+
+        s.update({'_id'          : sid},
+                 {'$currentDate' : {'created'  : { '$type': 'timestamp'},
+                                    'modified' : { '$type': 'timestamp'}}})
+
+        # retrieve the netry again, which now has the time stamp
+        cursor = s.find({'_id':sid})
+        data   = cursor[0]
+
+        # Create the pilot and unit collections, and the collection for the
+        # managers
+        db["%s.u"  % sid]
+        db["%s.um" % sid] 
+        db["%s.p"  % sid]
+        db["%s.pm" % sid] 
+
+        prof('session insert', msg='done')
+
+        print " == data ================="
+        import pprint
+        pprint.pprint (data)
+        print " ========================="
+
+        return data
+
+
+    # --------------------------------------------------------------------------
+    #
+    @staticmethod
+    def delete_session(dburl, sid):
+
+        now = timestamp ()
+
+        prof('session delete', msg='start')
+
+        mongo, db, dbname, pname, cname = ru.mongodb_connect (dburl)
+
+        if  db[sid].count() == 0 :
+            self._log.warning ("Session '%s' already gone.", sid)
+
+        s.update({'_id'          : sid},
+                 {'$currentDate' : {'deleted'  : { '$type': 'timestamp'},
+                                    'modified' : { '$type': 'timestamp'}}})
+
+        # retrieve the netry again, which now has the time stamp
+        cursor = s.find({'_id':sid})
+        data   = cursor[0]
+        db["%s"    % sid].drop 
+        db["%s.u"  % sid].drop 
+        db["%s.um" % sid].drop  
+        db["%s.p"  % sid].drop 
+        db["%s.pm" % sid].drop  
+
+        prof('session delete', msg='done')
+
+        print " == data ================="
+        import pprint
+        pprint.pprint (data)
+        print " ========================="
+
+        return data
+
+
+    # --------------------------------------------------------------------------
+    #
+    # insert is synchronous for now.  Once it becomes async, we push it with
+    # a COMMAND_INSERT onto the update queue -- then this method becomes
+    # a staticmethod like update_unit.  Then we don't need to do the bulking in
+    # the method, but can rely on the bulking behind the updater queue...
+    #
+    def insert_unit(units, msg=None, logger=None):
+
+        now = timestamp ()
+
+        if not isinstance (units, list):
+            units=[units]
+
+        cname = self._session_id + '.cu.2'   # FIXME: use def
+        coll  = self._mongo_db[cname]
+        bulk  = coll.initialize_ordered_bulk_op()
+
+        for unit in units :
+
+            uid = unit.uid
+
+            if logger and msg:
+                logger("unit '%s' insert: %s" % (uid, msg))
+
+            # use pseudo-deep copies
+            cu_dict = dict(unit._data)
+
+            # let mongodb add timestamps for unit updates
+
+            cu_data['type']          = 'unit'
+            cu_data['state_history'] = {'state'     : NEW, 
+                                        'timestamp' : now}
+            cu_data['$currentDate']  = {'modified'  : { '$type': 'timestamp' }}
+
+            bulk.insert (cu_dict)
+
+        res = bulk.execute()
+        self._log.debug("bulk insert result: %s", res)
+
+        prof('unit insert bulk pushed (%d)' % len(units))
+        for unit in units:
+            prof('unit insert pushed', uid=unit.uid)
 
 
     # --------------------------------------------------------------------------

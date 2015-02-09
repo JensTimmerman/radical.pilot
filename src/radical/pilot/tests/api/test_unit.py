@@ -10,18 +10,23 @@ import uuid
 
 from pymongo import MongoClient
 
-# DBURL defines the MongoDB server URL and has the format mongodb://host:port.
-# For the installation of a MongoDB server, refer to the MongoDB website:
-# http://docs.mongodb.org/manual/installation/
-DBURL = os.getenv("RADICAL_PILOT_DBURL")
-if DBURL is None:
+# RADICAL_PILOT_DBURL defines the MongoDB server URL and has the format
+# mongodb://host:port/db_name
+
+RP_DBENV = os.environ.get("RADICAL_PILOT_DBURL")
+if not RP_DBENV:
     print "ERROR: RADICAL_PILOT_DBURL (MongoDB server URL) is not defined."
     sys.exit(1)
-    
-DBNAME = os.getenv("RADICAL_PILOT_TEST_DBNAME")
-if DBNAME is None:
-    print "ERROR: RADICAL_PILOT_TEST_DBNAME (MongoDB database name) is not defined."
-    sys.exit(1)
+
+RP_DBURL = ru.Url (RP_DBENV)
+if not (RP_DBURL.path and len(RP_DBURL.path) > 1):
+    RP_DBURL=ru.generate_id ('rp_test.')
+
+DBURL      = ru.URL(RP_DBURL)
+DBURL.path = None
+DBURL      = str(DBURL)
+
+DBNAME     = RP_DBURL.path.lstrip('/')
 
 
 #-----------------------------------------------------------------------------
@@ -52,7 +57,7 @@ class TestUnit(unittest.TestCase):
     def test__unit_wait(self):
         """ Test if we can wait for different unit states.
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pm = radical.pilot.PilotManager(session=session)
 
@@ -79,16 +84,16 @@ class TestUnit(unittest.TestCase):
         cu = um.submit_units(cudesc)
 
         assert cu is not None
-        assert cu.submission_time is not None
-        assert cu.start_time is None # MS: I dont understand this assertion
+        assert cu.submitted is not None
+        assert cu.started is None # MS: I dont understand this assertion
 
         cu.wait(state=[radical.pilot.EXECUTING, radical.pilot.FAILED], timeout=5*60)
         assert cu.state == radical.pilot.EXECUTING
-        assert cu.start_time is not None
+        assert cu.started is not None
 
         cu.wait(timeout=5*60)
         assert cu.state == radical.pilot.DONE
-        assert cu.stop_time is not None
+        assert cu.finished is not None
 
         session.close()
 
@@ -97,7 +102,7 @@ class TestUnit(unittest.TestCase):
     def test__unit_cancel(self):
         """ Test if we can cancel a compute unit
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pm = radical.pilot.PilotManager(session=session)
 
@@ -127,19 +132,19 @@ class TestUnit(unittest.TestCase):
         cu = um.submit_units(cudesc)
 
         assert cu is not None
-        assert cu.submission_time is not None
+        assert cu.submitted is not None
 
         # Make sure it is running!
         cu.wait(state=radical.pilot.EXECUTING, timeout=60)
         assert cu.state == radical.pilot.EXECUTING
-        assert cu.start_time is not None
+        assert cu.started is not None
 
         # Cancel the CU!
         cu.cancel()
 
         cu.wait(timeout=60)
         assert cu.state == radical.pilot.CANCELED
-        assert cu.stop_time is not None
+        assert cu.finished is not None
 
         session.close()
 
@@ -148,7 +153,7 @@ class TestUnit(unittest.TestCase):
     def test__unit_cancel_um(self):
         """ Test if we can cancel a compute unit through the UM
         """
-        session = radical.pilot.Session(database_url=DBURL, database_name=DBNAME)
+        session = radical.pilot.Session(database_url=DBURL)
 
         pm = radical.pilot.PilotManager(session=session)
 
@@ -178,18 +183,18 @@ class TestUnit(unittest.TestCase):
         cu = um.submit_units(cudesc)
 
         assert cu is not None
-        assert cu.submission_time is not None
+        assert cu.submitted is not None
 
         # Make sure it is running!
         cu.wait(state=radical.pilot.EXECUTING, timeout=60)
         assert cu.state == radical.pilot.EXECUTING
-        assert cu.start_time is not None
+        assert cu.started is not None
 
         # Cancel the CU!
         um.cancel_units(cu.uid)
 
         cu.wait(timeout=60)
         assert cu.state == radical.pilot.CANCELED
-        assert cu.stop_time is not None
+        assert cu.finished is not None
 
         session.close()

@@ -122,8 +122,7 @@ if __name__ == "__main__":
 
     for unit in units:
         print "* Unit %s (executed @ %s) state: %s, exit code: %s, started: %s, finished: %s, output: %s" \
-            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.start_time, unit.stop_time,
-               unit.stdout)
+            % (unit.uid, unit.execution_locations, unit.state, unit.exit_code, unit.started, unit.finished, unit.stdout)
 
     # Close automatically cancels the pilot(s).
     session.close()

@@ -27,7 +27,7 @@
        - has a set of StageinWorkers  (threads or procs)
        - has a set of StageoutWorkers (threads or procs)
        - has a set of ExecWorkers     (threads or procs)
-       - has a set of UpdateWorkers   (threads or procs)
+       - has a set of UnitUpdater     (threads or procs)
        - has a HeartbeatMonitor       (threads or procs)
        - has a inputstaging  queue
        - has a outputstaging queue
@@ -84,7 +84,7 @@
        |           |              |              |             |
        |           |              |              |             |
        V           V              V              V             V
-     ExecWorker* StageinWorker* StageoutWorker* UpdateWorker* HeartbeatMonitor
+     ExecWorker* StageinWorker* StageoutWorker* UnitUpdater* HeartbeatMonitor
        |
        +-------------------------------------------------
        |     |               |                |         |
@@ -157,7 +157,7 @@ import radical.utils       as ru
 import radical.pilot       as rp
 import radical.pilot.utils as rpu
 
-from radical.pilot.update_worker import UpdateWorker
+from radical.pilot.updater import UnitUpdater
 
 from operator import mul
 
@@ -562,9 +562,9 @@ class Scheduler(threading.Thread):
 
         for _cu in cu_list :
             rpu.prof('push', msg="towards execution", uid=_cu['_id'])
-            UpdateWorker.update_unit(queue = self._update_queue, 
-                                     cu    = cu,
-                                     state = rp.EXECUTION_PENDING)
+            UnitUpdater.update_unit(queue = self._update_queue, 
+                                    cu    = cu,
+                                    state = rp.EXECUTION_PENDING)
             self._execution_queue.put(_cu)
 
         return True
@@ -651,9 +651,9 @@ class Scheduler(threading.Thread):
 
                     cu = data
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = rp.AGENT_SCHEDULING)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = rp.AGENT_SCHEDULING)
 
                     # we got a new unit to schedule.  Either we can place 
                     # it straight away and move it to execution, or we have
@@ -3292,11 +3292,11 @@ class ExecWorker_POPEN (ExecWorker) :
                         launcher = self._task_launcher
 
                     if not launcher:
-                        UpdateWorker.update_unit(queue  = self._update_queue, 
-                                                 cu     = cu,
-                                                 state  = rp.FAILED,
-                                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
-                                                 logger = self._log.error)
+                        UnitUpdater.update_unit(queue  = self._update_queue, 
+                                                cu     = cu,
+                                                state  = rp.FAILED,
+                                                msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
+                                                logger = self._log.error)
 
                     self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
@@ -3321,11 +3321,11 @@ class ExecWorker_POPEN (ExecWorker) :
                     # Free the Slots, Flee the Flots, Ree the Frots!
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
-                    UpdateWorker.update_unit(queue  = self._update_queue, 
-                                             cu     = cu,
-                                             state  = rp.FAILED,
-                                             msg    = "unit execution failed: %s" % e,
-                                             logger = self._log.exception)
+                    UnitUpdater.update_unit(queue  = self._update_queue, 
+                                            cu     = cu,
+                                            state  = rp.FAILED,
+                                            msg    = "unit execution failed: %s" % e,
+                                            logger = self._log.exception)
 
 
         except Exception as e:
@@ -3440,9 +3440,9 @@ class ExecWorker_POPEN (ExecWorker) :
         cu['proc']    = proc
 
         # register for state update and watching
-        UpdateWorker.update_unit(queue = self._update_queue, 
-                                 cu    = cu,
-                                 state = rp.EXECUTING)
+        UnitUpdater.update_unit(queue = self._update_queue, 
+                                cu    = cu,
+                                state = rp.EXECUTING)
 
         cu_list = rpu.blowup (self._config, cu, WATCH) 
         for _cu in cu_list :
@@ -3541,9 +3541,9 @@ class ExecWorker_POPEN (ExecWorker) :
                     self._cus_to_cancel.remove(cu['_id'])
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = rp.CANCELED)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = rp.CANCELED)
                     rpu.prof('final', msg="execcanceled", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
@@ -3563,9 +3563,9 @@ class ExecWorker_POPEN (ExecWorker) :
                 if exit_code != 0:
 
                     # The unit failed, no need to deal with its output data.
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = rp.FAILED)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = rp.FAILED)
                     rpu.prof('final', msg="execfailed", uid=cu['_id'], tag='watching')
                     # NOTE: this is final, cu will not be touched anymore
                     cu = None
@@ -3575,9 +3575,9 @@ class ExecWorker_POPEN (ExecWorker) :
                     # output data.  We always move to stageout, even if there are no
                     # directives -- at the very least, we'll upload stdout/stderr
 
-                    UpdateWorker.update_unit(queue = self._update_queue, 
-                                             cu    = cu,
-                                             state = rp.AGENT_STAGING_OUTPUT_PENDING)
+                    UnitUpdater.update_unit(queue = self._update_queue, 
+                                            cu    = cu,
+                                            state = rp.AGENT_STAGING_OUTPUT_PENDING)
                     cu_list = rpu.blowup (self._config, cu, STAGEOUT) 
                     for _cu in cu_list :
                         rpu.prof('push', msg="toward stageout", uid=_cu['_id'], tag='watching')
@@ -3686,11 +3686,11 @@ class ExecWorker_SHELL(ExecWorker):
                         launcher = self._task_launcher
 
                     if not launcher:
-                        UpdateWorker.update_unit(queue  = self._update_queue, 
-                                                 cu     = cu,
-                                                 state  = rp.FAILED,
-                                                 msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
-                                                 logger = self._log.error)
+                        UnitUpdater.update_unit(queue  = self._update_queue, 
+                                                cu     = cu,
+                                                state  = rp.FAILED,
+                                                msg    = "no launcher (mpi=%s)" % cu['description']['mpi'],
+                                                logger = self._log.error)
 
                     self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
@@ -3714,10 +3714,10 @@ class ExecWorker_SHELL(ExecWorker):
 
                     # Free the Slots, Flee the Flots, Ree the Frots!
                     self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-                    UpdateWorker.update_unit(queue  = self._update_queue, 
-                                             cu     = cu,
-                                             state  = rp.FAILED,
-                                             logger = self._log.exception)
+                    UnitUpdater.update_unit(queue  = self._update_queue, 
+                                            cu     = cu,
+                                            state  = rp.FAILED,
+                                            logger = self._log.exception)
 
 
         except Exception as e:
@@ -3886,9 +3886,9 @@ class ExecWorker_SHELL(ExecWorker):
         with self._registry_lock :
             self._registry[pid] = cu
 
-        UpdateWorker.update_unit(queue = self._update_queue, 
-                                 cu    = cu,
-                                 state = rp.EXECUTING)
+        UnitUpdater.update_unit(queue = self._update_queue, 
+                                cu    = cu,
+                                state = rp.EXECUTING)
         # FIXME: add profiling
 
 
@@ -4021,16 +4021,16 @@ class ExecWorker_SHELL(ExecWorker):
         if rp_state in [rp.FAILED, rp.CANCELED] :
             # final state - no further state transition needed
             self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-            UpdateWorker.update_unit(queue = self._update_queue, 
-                                     cu    = cu,
-                                     state = rp_state)
+            UnitUpdater.update_unit(queue = self._update_queue, 
+                                    cu    = cu,
+                                    state = rp_state)
 
         elif rp_state in [rp.DONE] :
             # advance the unit state
             self._schedule_queue.put ([COMMAND_UNSCHEDULE, cu])
-            UpdateWorker.update_unit(queue = self._update_queue, 
-                                     cu    = cu,
-                                     state = rp.AGENT_STAGING_OUTPUT_PENDING)
+            UnitUpdater.update_unit(queue = self._update_queue, 
+                                    cu    = cu,
+                                    state = rp.AGENT_STAGING_OUTPUT_PENDING)
 
             cu_list = rpu.blowup (self._config, cu, STAGEOUT) 
             for _cu in cu_list :
@@ -4091,9 +4091,9 @@ class StageinWorker(threading.Thread):
                 if not cu:
                     continue
 
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = rp.AGENT_STAGING_INPUT)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = rp.AGENT_STAGING_INPUT)
 
                 sandbox      = os.path.join(self._workdir, '%s' % cu['_id'])
                 staging_area = os.path.join(self._workdir, agent_config['staging_area'])
@@ -4150,10 +4150,10 @@ class StageinWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        UpdateWorker.update_unit(queue = self._update_queue, 
-                                                 cu    = cu,
-                                                 state = rp.FAILED,
-                                                 msg   = log_message)
+                        UnitUpdater.update_unit(queue = self._update_queue, 
+                                                cu    = cu,
+                                                state = rp.FAILED,
+                                                msg   = log_message)
 
                 # agent staging is all done, unit can go to execution
                 self._agent.update_unit(queue = self._update_queue, 
@@ -4230,9 +4230,9 @@ class StageoutWorker(threading.Thread):
                 if not cu:
                     continue
 
-                UpdateWorker.update_unit(queue = self._update_queue, 
-                                         cu    = cu,
-                                         state = rp.AGENT_STAGING_OUTPUT)
+                UnitUpdater.update_unit(queue = self._update_queue, 
+                                        cu    = cu,
+                                        state = rp.AGENT_STAGING_OUTPUT)
 
                 sandbox = os.path.join(self._workdir, '%s' % cu['_id'])
 
@@ -4310,10 +4310,10 @@ class StageoutWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        UpdateWorker.update_unit(queue = self._update_queue, 
-                                                 cu    = cu,
-                                                 state = rp.FAILED,
-                                                 msg   = log_message)
+                        UnitUpdater.update_unit(queue = self._update_queue, 
+                                                cu    = cu,
+                                                state = rp.FAILED,
+                                                msg   = log_message)
 
 
                 if cu['UMGR_Output_Directives']:
@@ -4322,19 +4322,19 @@ class StageoutWorker(threading.Thread):
                     next_state = rp.DONE
 
                 rpu.prof('final', msg="stageout done", uid=cu['_id'], tag='stageout')
-                UpdateWorker.update_unit(queue  = self._update_queue, 
-                                         cu     = cu,
-                                         state  = next_state,
-                                         update = {
-                                             '$set': {
-                                                 'stdout'    : cu['stdout'],
-                                                 'stderr'    : cu['stderr'],
-                                                 'exit_code' : cu['exit_code'],
-                                                 'started'   : cu['started'],
-                                                 'finished'  : cu['finished'],
-                                                 'slots'     : cu['opaque_slot'],
-                                             }
-                                         })
+                UnitUpdater.update_unit(queue  = self._update_queue, 
+                                        cu     = cu,
+                                        state  = next_state,
+                                        update = {
+                                            '$set': {
+                                                'stdout'    : cu['stdout'],
+                                                'stderr'    : cu['stderr'],
+                                                'exit_code' : cu['exit_code'],
+                                                'started'   : cu['started'],
+                                                'finished'  : cu['finished'],
+                                                'slots'     : cu['opaque_slot'],
+                                            }
+                                        })
 
                 # NOTE: this is final for the agent scope -- further state
                 # transitions are done by the FTW.
@@ -4350,7 +4350,7 @@ class StageoutWorker(threading.Thread):
                 # invalid state transitions...
                 if cu:
                     rpu.prof('final', msg="stageout failed", uid=cu['_id'], tag='stageout')
-                    UpdateWorker.update_unit(queue  = self._update_queue, 
+                    UnitUpdater.update_unit(queue  = self._update_queue, 
                                              cu     = cu,
                                              state  = rp.FAILED,
                                              update = {
@@ -4492,9 +4492,7 @@ class Agent(object):
     #
     def __init__(self, name, config, logger, lrms_name, requested_cores,
             task_launch_method, mpi_launch_method, spawner,
-            scheduler_name, runtime,
-            mongodb_url, mongodb_name, mongodb_auth,
-            pilot_id, session_id):
+            scheduler_name, runtime, dburl, pilot_id, session_id):
 
         rpu.prof('Agent init')
 
@@ -4520,7 +4518,7 @@ class Agent(object):
         self._update_queue          = QUEUE_TYPE()
         self._command_queue         = QUEUE_TYPE()
 
-        mongo_db = rpu.get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
+        mongo, mongo_db, _, _, _ = ru.mongodb_connect (dburl)
 
         self._p  = mongo_db["%s.p"  % self._session_id]
         self._cu = mongo_db["%s.cu" % self._session_id]
@@ -4605,16 +4603,13 @@ class Agent(object):
 
 
         for n in range(self._config['number_of_workers'][UPDATE]):
-            update_worker = UpdateWorker(
-                name            = "UpdateWorker-%d" % n,
+            update_worker = UnitUpdater(
+                name            = "UnitUpdater-%d" % n,
                 config          = self._config,
-                agent           = self,
                 logger          = self._log,
                 session_id      = self._session_id,
                 update_queue    = self._update_queue,
-                mongodb_url     = mongodb_url,
-                mongodb_name    = mongodb_name,
-                mongodb_auth    = mongodb_auth
+                dburl           = dburl
             )
             self.worker_list.append(update_worker)
 
@@ -4904,9 +4899,18 @@ def main():
         # ----------------------------------------------------------------------
         # Establish database connection
         rpu.prof('db setup')
-        mongo_db = rpu.get_mongodb(options.mongodb_url, options.mongodb_name,
-                                   options.mongodb_auth)
-        mongo_p  = mongo_db["%s.p" % options.session_id]
+
+        dburl = ru.Url(options.mongodb_url)
+
+        if options.mongodb_auth :
+            username, password = options.mongodb_auth.split (':', 1)
+            dburl.set_username (username)
+            dburl.set_password (password)
+
+        dburl.path = options.mongodb_name
+
+        mongo, mongo_db, _, _, _ = ru.mongodb_connect (dburl)
+        mongo_p = mongo_db["%s.p" % options.session_id]
 
 
         # ----------------------------------------------------------------------
@@ -4923,9 +4927,7 @@ def main():
                 spawner            = options.spawner,
                 scheduler_name     = options.agent_scheduler,
                 runtime            = options.runtime,
-                mongodb_url        = options.mongodb_url,
-                mongodb_name       = options.mongodb_name,
-                mongodb_auth       = options.mongodb_auth,
+                dburl              = options.mongodb_url,
                 pilot_id           = options.pilot_id,
                 session_id         = options.session_id
         )
