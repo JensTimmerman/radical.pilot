@@ -3,7 +3,7 @@
 """
 .. module:: radical.pilot.pilot_manager
    :platform: Unix
-   :synopsis: Provides the interface for the PilotManager class.
+   :synopsis: Implementation of the PilotManager class.
 
 .. moduleauthor:: Ole Weidner <ole.weidner@rutgers.edu>
 """
@@ -17,13 +17,14 @@ import multiprocessing
 
 import radical.utils as ru
 
-from radical.pilot.types        import *
-from radical.pilot.states       import *
-from radical.pilot.exceptions   import *
+from radical.pilot.types           import *
+from radical.pilot.states          import *
+from radical.pilot.exceptions      import *
 
 from radical.pilot.compute_pilot   import ComputePilot
 from radical.pilot.utils.logger    import logger
 from radical.pilot.resource_config import ResourceConfig
+
 
 # ------------------------------------------------------------------------------
 #
@@ -125,9 +126,9 @@ class PilotManager(object):
 
         COMPONENT_TYPE.__init__(self)
 
-        self._session       = session
-        self._log           = session._log
-        self._updater       = session._updater
+        self._session        = session
+        self._log            = session._log
+        self._updater        = session._updater
 
         # set up internal state
         self._state          = ACTIVE
@@ -430,7 +431,7 @@ class PilotManager(object):
             * **timeout** [`float`]
               Optional timeout in seconds before the call returns regardless
               whether the Pilots have reached the desired state or not.
-              The default value **-1.0** never times out.
+              The default value **None** never times out.
         """
 
         if self._state in FINAL:

@@ -17,16 +17,16 @@ import multiprocessing
 
 import radical.utils as ru
 
-from radical.pilot.types        import *
-from radical.pilot.states       import *
-from radical.pilot.exceptions   import *
+from radical.pilot.types           import *
+from radical.pilot.states          import *
+from radical.pilot.exceptions      import *
 
-from radical.pilot.compute_unit import ComputeUnit
-from radical.pilot.utils.logger import logger
+from radical.pilot.compute_unit    import ComputeUnit
+from radical.pilot.utils.logger    import logger
 
-from radical.pilot.scheduler    import UMGR_Scheduler
-from radical.pilot.staging      import UMGR_Staging_Input
-from radical.pilot.staging      import UMGR_Staging_Output
+from radical.pilot.scheduler       import UMGR_Scheduler
+from radical.pilot.staging         import UMGR_Staging_Input
+from radical.pilot.staging         import UMGR_Staging_Output
 
 
 # ------------------------------------------------------------------------------
@@ -160,10 +160,10 @@ class UnitManager(COMPONENT_TYPE):
 
         COMPONENT_TYPE.__init__(self)
 
-        self._session      = session
-        self._log          = session._log
-        self._updater      = session._updater
-        self._update_queue = session._updater_queue
+        self._session        = session
+        self._log            = session._log
+        self._updater        = session._updater
+        self._update_queue   = session._updater_queue
 
         # set up internal state
         self._state          = ACTIVE
@@ -265,8 +265,8 @@ class UnitManager(COMPONENT_TYPE):
             self.cancel ([unit.uid for unit in self.units if unit.state not in FINAL])
 
         # drop object references
-        self._units  = list()
         self._pilots = list()
+        self._units  = list()
 
         # stop all threads etc
         for worker in self._worker_list:
@@ -532,8 +532,9 @@ class UnitManager(COMPONENT_TYPE):
               * :data:`radical.pilot.CANCELED`
 
             * **timeout** [`float`]
-              Timeout in seconds before the call returns regardless of Unit
-              state changes. The default value **None** waits forever.
+              Optional timeout in seconds before the call returns regardless
+              whether the Units have reached the desired state or not.
+              The default value **None** never times out.
         """
 
         if self._state in FINAL:
