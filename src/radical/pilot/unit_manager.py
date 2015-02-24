@@ -162,8 +162,7 @@ class UnitManager(COMPONENT_TYPE):
 
         self._session        = session
         self._log            = session._log
-        self._updater        = session._updater
-        self._update_queue   = session._updater_queue
+        self._update_queue   = session._update_queue
 
         # set up internal state
         self._state          = ACTIVE
@@ -441,8 +440,8 @@ class UnitManager(COMPONENT_TYPE):
         # TODO: push to scheduling queue (as dict)
 
         with self._lock:
-            self._units         += units
-           self.wait_queue_size += len(units)
+            self._units          += units
+            self.wait_queue_size += len(units)
 
         if  return_list_type : return units[:]
         else                 : return units[0]
@@ -684,7 +683,7 @@ class UnitManager(COMPONENT_TYPE):
             if not metric in self._callbacks :
                 self._callbacks[metric] = list()
 
-            self._callbacks[metric].append (callback_function, callback_state)
+            self._callbacks[metric].append ([callback_function, callback_data])
 
 
 # ------------------------------------------------------------------------------

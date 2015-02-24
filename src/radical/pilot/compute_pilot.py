@@ -15,14 +15,14 @@ import os
 import time
 import saga
 
-from radical.pilot.states import *
-from radical.pilot.logentry import *
-from radical.pilot.exceptions import *
+import radical.utils as ru
 
 from radical.pilot.utils.logger import logger
 
-from radical.pilot.staging_directives import TRANSFER, COPY, LINK, MOVE, \
-    STAGING_AREA, expand_staging_directive
+from radical.pilot.states       import *
+from radical.pilot.logentry     import *
+from radical.pilot.exceptions   import *
+
 
 # -----------------------------------------------------------------------------
 #
@@ -36,7 +36,6 @@ class ComputePilot (object):
                 **Example**::
 
                       pm = radical.pilot.PilotManager(session=s)
-
                       pd = radical.pilot.ComputePilotDescription()
                       pd.resource = "local.localhost"
                       pd.cores    = 2
@@ -44,97 +43,52 @@ class ComputePilot (object):
 
                       pilot = pm.submit_pilots(pd)
     """
+
     # -------------------------------------------------------------------------
     #
-    def __init__(self):
-        """Le constructeur. Not meant to be called directly.
+    def __init__(pd=None, pid=None, pmgr=None):
+        """ 
+        Create a new Compute Pilot, either by passing a ComputePilotDescritption,
+        or be passing a pilot ID, to reconnect to a previously created and
+        submitted pilot.
         """
+
+        self._callbacks     = list()
+        self._data          = dict()
+        self._pmgr          = pmgr
+
+        if not pd and not pid:
+            raise ValueError ("need either compute pilot description of ID for object creation")
+
+        if pd and pid:
+            raise ValueError ("need either compute pilot description of ID for object creation, not both")
+
+        # sanity check on description
+        if not pd.get('resource'):
+            raise PilotException ("ComputePilotDescription needs a resource")
+
         # 'static' members
-        self._uid = None
-        self._description = None
-        self._manager = None
+        if pd:
+            self._data['_id']         = ru.generate_id('pilot.%(counter)02d', ru.ID_CUSTOM)
+            self._data['description'] = copy.deepcopy (pd)  # keep the original pd reusable
 
-        # Registered callback functions
-        self._calback_wrappers = dict()
+        else:
+            pass
+            # FIXME: reconnect!
+          # self._description = None
+          # self._pid         = None
 
-        # handle to the manager's worker
-        self._worker = None
+        self._pid         = self._description['_id']
+      # self._name        = self._description.get ('name')
 
-        # list of callback functions
-        self._callback_list = []
-
-    # -------------------------------------------------------------------------
-    #
-    @staticmethod
-    def create(pilot_manager_obj, pilot_description):
-        """ PRIVATE: Create a new pilot.
-        """
-        # Create and return pilot object.
-        pilot = ComputePilot()
-
-        #pilot._uid = pilot_uid
-        pilot._description = pilot_description
-        pilot._manager = pilot_manager_obj
-
-        # Pilots use the worker of their parent manager.
-        pilot._worker = pilot._manager._worker
-
-        #logger.info("Created new ComputePilot %s" % str(pilot))
-        return pilot
-
-    # -------------------------------------------------------------------------
-    #
-    @staticmethod
-    def _get(pilot_manager_obj, pilot_ids):
-        """ PRIVATE: Get one or more pilot via their UIDs.
-        """
-        pilots_json = pilot_manager_obj._worker.get_compute_pilot_data(
-            pilot_ids=pilot_ids)
-
-        # create and return pilot objects
-        pilots = []
-
-        for p in pilots_json:
-            pilot = ComputePilot()
-            pilot._uid = str(p['_id'])
-            pilot._description = p['description']
-            pilot._manager = pilot_manager_obj
-
-            pilot._worker = pilot._manager._worker
-
-            logger.debug("Reconnected to existing ComputePilot %s" % str(pilot))
-            pilots.append(pilot)
-
-        return pilots
-
-    # -------------------------------------------------------------------------
-    #
-    def as_dict(self):
-        """Returns a Python dictionary representation of the
-           ComputePilot object.
-        """
-        obj_dict = {
-            'uid':             self.uid,
-            'state':           self.state,
-            'stdout':          self.stdout,
-            'stderr':          self.stderr,
-            'logfile':         self.logfile,
-            'log':             self.log,
-            'sandbox':         self.sandbox,
-            'resource':        self.resource,
-            'submitted':       self.submitted,
-            'started':      self.started,
-            'finished':       self.finished,
-            'resource_detail': self.resource_detail
-        }
-        return obj_dict
 
     # -------------------------------------------------------------------------
     #
     def __str__(self):
-        """Returns a string representation of the ComputePilot object.
-        """
-        return str(self.as_dict())
+
+        return "%s (%-15s: %s)" % (self.pid, self.state, 
+                                   self.description.resource)
+
 
     # -------------------------------------------------------------------------
     #
@@ -148,7 +102,8 @@ class ComputePilot (object):
         **Returns:**
             * A unique identifier (string).
         """
-        return self._uid
+        return self._pid
+
 
     # -------------------------------------------------------------------------
     #
@@ -158,20 +113,54 @@ class ComputePilot (object):
         """
         return self._description
 
+
     # -------------------------------------------------------------------------
     #
     @property
     def sandbox(self):
-        """Returns the Pilot's 'sandbox' / working directory url.
+        """Returns the full sandbox directory URL of this ComputePilot.
 
         **Returns:**
-            * A URL string.
+            * A URL
         """
         if not self._uid:
             return None
 
-        pilot_json = self._worker.get_compute_pilot_data(pilot_ids=self.uid)
-        return pilot_json['sandbox']
+        return self._data['sandbox']
+
+
+    # FIXME: from here
+    # -------------------------------------------------------------------------
+    #
+    @property
+    def stdout(self):
+        """Returns a snapshot of the executable's STDOUT stream.
+
+        If this property is queried before the ComputeUnit has reached
+        'DONE' or 'FAILED' state it will return None.
+
+        .. warning: This can become very inefficient for large data volumes.
+        """
+
+        # note: we may want to make this one pull based...
+        return self._data['stdout']
+
+
+    # -------------------------------------------------------------------------
+    #
+    @property
+    def stderr(self):
+        """Returns a snapshot of the executable's STDERR stream.
+
+        If this property is queried before the ComputeUnit has reached
+        'DONE' or 'FAILED' state it will return None.
+
+        .. warning: This can become very inefficient for large data volumes.
+        """
+
+        # note: we may want to make this one pull based...
+        return self._data['stderr']
+
 
     # -------------------------------------------------------------------------
     #
@@ -179,11 +168,9 @@ class ComputePilot (object):
     def state(self):
         """Returns the current state of the pilot.
         """
-        if not self._uid:
-            return None
 
-        pilot_json = self._worker.get_compute_pilot_data(pilot_ids=self.uid)
-        return pilot_json['state']
+        return self._data['state']
+
 
     # -------------------------------------------------------------------------
     #
@@ -214,7 +201,7 @@ class ComputePilot (object):
         callbacks = []
 
         pilot_json = self._worker.get_compute_pilot_data(pilot_ids=self.uid)
-        if 'callbackhostory' in pilot_json :
+        if 'callbackhostory' in pilot_json:
             for callback in pilot_json['callbackhistory']:
                 callbacks.append(State(state=callback["state"], timestamp=callback["timestamp"]))
 
@@ -461,63 +448,5 @@ class ComputePilot (object):
         # now we can send a 'cancel' command to the pilot.
         self._manager.cancel_pilots(self.uid)
 
-    # -------------------------------------------------------------------------
-    #
-    def stage_in(self, directives):
-        """Stages the content of the staging directive into the pilot's
-        staging area"""
+# ------------------------------------------------------------------------------
 
-        # Wait until we can assume the pilot directory to be created
-        if self.state == NEW:
-            self.wait(state=[LAUNCHING_PENDING, LAUNCHING, ACTIVE_PENDING, ACTIVE])
-        elif self.state in [DONE, FAILED, CANCELED]:
-            raise Exception("Pilot already finished, no need to stage anymore!")
-
-        # Iterate over all directives
-        for directive in expand_staging_directive(directives, logger):
-
-            source = directive['source']
-            action = directive['action']
-
-            # TODO: verify target?
-            # Convert the target_url into a SAGA Url object
-            target_url = saga.Url(directive['target'])
-
-            # Handle special 'staging' scheme
-            if target_url.scheme == 'staging':
-                logger.info('Operating from staging')
-
-                # Remove the leading slash to get a relative path from the staging area
-                target = target_url.path.split('/',1)[1]
-
-                remote_dir_url = saga.Url(os.path.join(self.sandbox, STAGING_AREA))
-            else:
-                remote_dir_url = target_url
-                remote_dir_url.path = os.path.dirname(directive['target'])
-                target = os.path.basename(directive['target'])
-
-            # Define and open the staging directory for the pilot
-            remote_dir = saga.filesystem.Directory(remote_dir_url,
-                                               flags=saga.filesystem.CREATE_PARENTS)
-
-            if action == LINK:
-                # TODO: Does this make sense?
-                #log_message = 'Linking %s to %s' % (source, abs_target)
-                #os.symlink(source, abs_target)
-                pass
-            elif action == COPY:
-                # TODO: Does this make sense?
-                #log_message = 'Copying %s to %s' % (source, abs_target)
-                #shutil.copyfile(source, abs_target)
-                pass
-            elif action == MOVE:
-                # TODO: Does this make sense?
-                #log_message = 'Moving %s to %s' % (source, abs_target)
-                #shutil.move(source, abs_target)
-                pass
-            elif action == TRANSFER:
-                log_message = 'Transferring %s to %s' % (source, remote_dir_url)
-                # Transfer the local file to the remote staging area
-                remote_dir.copy(source, target)
-            else:
-                raise Exception('Action %s not supported' % action)

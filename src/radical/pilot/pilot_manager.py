@@ -22,9 +22,10 @@ from radical.pilot.states          import *
 from radical.pilot.exceptions      import *
 
 from radical.pilot.compute_pilot   import ComputePilot
-from radical.pilot.utils.logger    import logger
 from radical.pilot.resource_config import ResourceConfig
+from radical.pilot.utils.logger    import logger
 
+from radical.pilot.launcher        import PMGR_Launcher
 
 # ------------------------------------------------------------------------------
 #
@@ -87,7 +88,7 @@ rp_config['number_of_workers'] = NUMBER_OF_WORKERS
 
 # -----------------------------------------------------------------------------
 #
-class PilotManager(object):
+class PilotManager(COMPONENT_TYPE):
     """A PilotManager holds :class:`radical.pilot.ComputePilot` instances that are
     submitted via the :func:`radical.pilot.PilotManager.submit_pilots` method.
 
@@ -128,7 +129,7 @@ class PilotManager(object):
 
         self._session        = session
         self._log            = session._log
-        self._updater        = session._updater
+        self._update_queue   = session._update_queue
 
         # set up internal state
         self._state          = ACTIVE
@@ -158,7 +159,8 @@ class PilotManager(object):
                 config                    = rp_config, 
                 logger                    = self._log,
                 session                   = self._session,
-                pmgr_launcher_queue       = self._pmgr_launcher_queue)
+                pmgr_launcher_queue       = self._pmgr_launcher_queue,
+                update_queue              = self._update_queue)
             self._worker_list.append(worker)
 
 
@@ -568,7 +570,7 @@ class PilotManager(object):
             if not metric in self._callbacks :
                 self._callbacks[metric] = list()
 
-            self._callbacks[metric].append (callback_function, callback_state)
+            self._callbacks[metric].append ([callback_function, callback_data])
 
 
 # ------------------------------------------------------------------------------

@@ -87,7 +87,7 @@ CANCELED                     = CANCELED
 ACTIVE                       = ACTIVE
 DONE                         = DONE
 FAILED                       = FAILED
-CANCELLED                    = CANCELLED
+CANCELED                     = CANCELED
 
 
 # -----------------------------------------------------------------------------

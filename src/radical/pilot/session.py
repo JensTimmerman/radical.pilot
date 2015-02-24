@@ -27,6 +27,7 @@ from radical.pilot.utils.logger    import logger
 from radical.pilot.resource_config import ResourceConfig
 from radical.pilot.exceptions      import PilotException
 from radical.pilot.updater         import UnitUpdater
+from radical.pilot.states          import *
 
 from radical.pilot.db              import Session as dbSession
 from radical.pilot.db              import DBException
@@ -260,6 +261,8 @@ class Session(saga.Session):
                 dburl        = self._database_url)
             self._worker_list.append(worker)
 
+        self._state = ACTIVE
+
 
     #---------------------------------------------------------------------------
     #
@@ -315,7 +318,7 @@ class Session(saga.Session):
             self._data = UnitUpdater.delete_session (self._database_url, self._uid)
             self._log.info("session %s deleted", self._uid)
 
-        self._state = CANCELLED
+        self._state = CANCELED
 
 
         self._log.debug("session %s closed", self._uid)

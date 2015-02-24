@@ -19,13 +19,13 @@ import radical.utils as ru
 
 from radical.pilot.utils.logger import logger
 
-from radical.pilot.states import *
-from radical.pilot.logentry import *
-from radical.pilot.exceptions import *
-
-from radical.pilot.db.database import COMMAND_CANCEL_COMPUTE_UNIT
+from radical.pilot.states       import *
+from radical.pilot.logentry     import *
+from radical.pilot.exceptions   import *
 
 from radical.pilot.staging_directives import expand_staging_directives
+from radical.pilot.db.database        import COMMAND_CANCEL_COMPUTE_UNIT
+
 
 # -----------------------------------------------------------------------------
 #
@@ -38,8 +38,7 @@ class ComputeUnit(object):
 
                 **Example**::
 
-                      umgr = radical.pilot.UnitManager(session=s)
-
+                      um = radical.pilot.UnitManager(session=s)
                       ud = radical.pilot.ComputeUnitDescription()
                       ud.executable = "/bin/date"
                       ud.cores      = 1
@@ -56,29 +55,30 @@ class ComputeUnit(object):
         submitted unit.
         """
 
-        self._callbacks     = list()
-        self._data          = dict()
-        self._data['pilot'] = None
+        self._callbacks   = list()
+        self._data        = dict()
+        self._data['pid'] = None
+        self._umgr        = umgr
 
-        if  not (ud or uid) :
+        if not ud and not uid:
             raise ValueError ("need either compute unit description of ID for object creation")
 
-        if  ud and uid :
+        if ud and uid:
             raise ValueError ("need either compute unit description of ID for object creation, not both")
 
         # sanity check on description
-        if  not (ud.get('executable') or ud.get('kernel')) :
+        if not (ud.get('executable') or ud.get('kernel')):
             raise PilotException ("ComputeUnitDescription needs an executable or application kernel")
 
         # 'static' members
-        if ud :
+        if ud:
             self._data['_id']         = ru.generate_id('unit.%(counter)06d', ru.ID_CUSTOM)
             self._data['description'] = copy.deepcopy (ud)  # keep the original ud reusable
 
             # expand any staging directives
             expand_staging_directives(self._data['description'],  logger)
 
-        else :
+        else:
             pass
             # FIXME: reconnect!
           # self._description = None
@@ -86,7 +86,6 @@ class ComputeUnit(object):
 
         self._uid         = self._description['_id']
         self._name        = self._description.get ('name')
-        self._manager     = umgr
 
 
 
@@ -97,31 +96,6 @@ class ComputeUnit(object):
         return "%s (%-15s: %s %s)" % (self.uid, self.state, 
                                       self.description.executable, 
                                       " ".join (self.description.arguments))
-
-
-    # -------------------------------------------------------------------------
-    #
-    @staticmethod
-    def _get(unit_manager_obj, unit_ids):
-        """ PRIVATE: Get one or more Compute Units via their UIDs.
-        """
-        units_json = unit_manager_obj._session._dbs.get_compute_units(
-            unit_manager_id=unit_manager_obj.uid,
-            unit_ids=unit_ids
-        )
-        # create and return unit objects
-        computeunits = []
-
-        for u in units_json:
-            computeunit = ComputeUnit()
-            computeunit._uid = str(u['_id'])
-            computeunit._description = u['description']
-            computeunit._manager = unit_manager_obj
-            computeunit._worker = unit_manager_obj._worker
-
-            computeunits.append(computeunit)
-
-        return computeunits
 
 
     # -------------------------------------------------------------------------
@@ -158,6 +132,9 @@ class ComputeUnit(object):
     @property
     def working_directory(self):
         """Returns the full working directory URL of this ComputeUnit.
+
+        **Returns:**
+            * A URL
         """
 
         return self._data['workdir']
@@ -170,7 +147,7 @@ class ComputeUnit(object):
         """Returns the pilot_id of this ComputeUnit.
         """
 
-        return self._data['pilot']
+        return self._data['pid']
 
 
     # -------------------------------------------------------------------------
@@ -338,9 +315,9 @@ class ComputeUnit(object):
               By default `wait` waits for the compute unit to reach
               a **terminal** state, which can be one of the following:
 
-              * :data:`radical.pilot.states.DONE`
-              * :data:`radical.pilot.states.FAILED`
-              * :data:`radical.pilot.states.CANCELED`
+              * :data:`radical.pilot.DONE`
+              * :data:`radical.pilot.FAILED`
+              * :data:`radical.pilot.CANCELED`
 
             * **timeout** [`float`]
               Optional timeout in seconds before the call returns regardless
@@ -381,7 +358,7 @@ class ComputeUnit(object):
 
         # FIXME: use updater
 
-        pid = self._data['pilot']
+        pid = self._data['pid']
 
         if self.state in [DONE, FAILED, CANCELED]:
             # nothing to do
@@ -389,27 +366,27 @@ class ComputeUnit(object):
 
         elif self.state in [NEW, UNSCHEDULED, PENDING_INPUT_STAGING]:
             logger.debug("Compute unit %s has state %s, going to prevent from starting." % (self._uid, self.state))
-            self._manager._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
+            self._umgr._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
 
         elif self.state == STAGING_INPUT:
             logger.debug("Compute unit %s has state %s, will cancel the transfer." % (self._uid, self.state))
-            self._manager._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
+            self._umgr._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
 
         elif self.state in [PENDING_EXECUTION, SCHEDULING]:
             logger.debug("Compute unit %s has state %s, will abort start-up." % (self._uid, self.state))
-            self._manager._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
+            self._umgr._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
 
         elif self.state == EXECUTING:
             logger.debug("Compute unit %s has state %s, will terminate the task." % (self._uid, self.state))
-            self._manager._session._dbs.send_command_to_pilot(cmd=COMMAND_CANCEL_COMPUTE_UNIT, arg=self.uid, pilot_ids=pid)
+            self._umgr._session._dbs.send_command_to_pilot(cmd=COMMAND_CANCEL_COMPUTE_UNIT, arg=self.uid, pilot_ids=pid)
 
         elif self.state == PENDING_OUTPUT_STAGING:
             logger.debug("Compute unit %s has state %s, will abort the transfer." % (self._uid, self.state))
-            self._manager._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
+            self._umgr._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
 
         elif self.state == STAGING_OUTPUT:
             logger.debug("Compute unit %s has state %s, will cancel the transfer." % (self._uid, self.state))
-            self._manager._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
+            self._umgr._session._dbs.set_compute_unit_state(self._uid, CANCELED, ["Received Cancel"])
 
         else:
             raise IncorrectState("Unknown Compute Unit state: %s, cannot cancel" % self.state)
