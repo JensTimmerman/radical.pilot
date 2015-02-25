@@ -176,7 +176,8 @@ elif AGENT_MODE == AGENT_PROCESSES :
     COMPONENT_MODE = multiprocessing
     COMPONENT_TYPE = multiprocessing.Process
     QUEUE_TYPE     = multiprocessing.Queue
-    
+else:
+    raise Exception('Unknown Agent Mode')
 
 
 # this needs git attribute 'ident' set for this file
@@ -304,6 +305,9 @@ BUSY     = 'Busy'
 agent_config = {
     # directory for staging files inside the agent sandbox
     'staging_area'         : 'staging_area',
+    
+    # url scheme to indicate the use of staging_area
+    'staging_scheme'       : 'staging',
     
     # max number of cu out/err chars to push to db
     'max_io_loglength'     : 1*1024,
@@ -576,6 +580,8 @@ class Scheduler(threading.Thread):
     def _reschedule(self):
 
         rpu.prof('reschedule')
+      # rpu.prof(self.slot_status (short=True))
+
         # cycle through wait queue, and see if we get anything running now.  We
         # cycle over a copy of the list, so that we can modify the list on the
         # fly
@@ -685,7 +691,6 @@ class Scheduler(threading.Thread):
 
                 else :
                     raise ValueError ("cannot handle scheduler command '%s'", command)
-
 
             except Exception as e:
                 self._log.exception('Error in scheduler loop: %s', e)
@@ -2625,6 +2630,9 @@ class LoadLevelerLRMS(LRMS):
     #
     def _configure(self):
 
+        loadl_node_list = None
+        loadl_cpus_per_node = None
+
         # Determine method for determining hosts,
         # either through hostfile or BG/Q environment.
         loadl_hostfile = os.environ.get('LOADL_HOSTFILE')
@@ -2663,16 +2671,8 @@ class LoadLevelerLRMS(LRMS):
 
         elif self.loadl_bg_block is not None:
             # Blue Gene specific.
-
-          # # FIXME: the setting below is unused?
-          # #        So why are we raising an exception?
-          # loadl_bg_size_str = os.environ.get('LOADL_BG_SIZE')
-          # if loadl_bg_size_str is None:
-          #     msg = "$LOADL_BG_SIZE not set!"
-          #     self._log.error(msg)
-          #     raise RuntimeError(msg)
-          # else:
-          #     loadl_bg_size = int(loadl_bg_size_str)
+            loadl_bg_midplane_list_str = None
+            loadl_bg_block_size_str = None
 
             loadl_job_name = os.environ.get('LOADL_JOB_NAME')
             if loadl_job_name is None:
@@ -3683,6 +3683,16 @@ class ExecWorker_SHELL(ExecWorker):
 
         self._deactivate += 'unset VIRTUAL_ENV\n\n'
 
+        if old_path: os.environ['PATH']        = old_path
+        if old_home: os.environ['PYTHON_HOME'] = old_home
+        if old_ps1:  os.environ['PS1']         = old_ps1
+
+        if 'VIRTUAL_ENV' in os.environ :
+            del(os.environ['VIRTUAL_ENV'])
+
+        # simplify shell startup / prompt detection
+        os.environ['PS1'] = '$ '
+
         # the registry keeps track of units to watch, indexed by their shell
         # spawner process ID.  As the registry is shared between the spawner and
         # watcher thread, we use a lock while accessing it.
@@ -3697,9 +3707,9 @@ class ExecWorker_SHELL(ExecWorker):
         self.launcher_shell = sups.PTYShell ("fork://localhost/")
         self.monitor_shell  = sups.PTYShell ("fork://localhost/")
 
+        # run the spawner on the shells
         self.workdir = "%s/spawner.%s" % (os.getcwd(), self.name)
         rec_makedir(self.workdir)
-
 
         ret, out, _  = self.launcher_shell.run_sync \
                            ("/bin/sh %s/agent/radical-pilot-spawner.sh %s" \
@@ -3718,7 +3728,6 @@ class ExecWorker_SHELL(ExecWorker):
         self._watcher = threading.Thread(target = self._watch, 
                                          name   = watcher_name)
         self._watcher.start ()
-
 
 
         try:
@@ -4170,7 +4179,7 @@ class StageinWorker(threading.Thread):
                     source_url = saga.Url(directive['source'])
 
                     # Handle special 'staging' scheme
-                    if source_url.scheme == 'staging':
+                    if source_url.scheme == STAGING_SCHEME:
                         self._log.info('Operating from staging')
                         # Remove the leading slash to get a relative path from the staging area
                         rel2staging = source_url.path.split('/',1)[1]
@@ -4329,7 +4338,7 @@ class StageoutWorker(threading.Thread):
                     target_url = saga.Url(directive['target'])
 
                     # Handle special 'staging' scheme
-                    if target_url.scheme == 'staging':
+                    if target_url.scheme == STAGING_SCHEME:
                         self._log.info('Operating from staging')
                         # Remove the leading slash to get a relative path from
                         # the staging area
@@ -4352,16 +4361,19 @@ class StageoutWorker(threading.Thread):
                     try:
                         self._log.info("Going to '%s' %s to %s", directive['action'], abs_source, target)
 
-                        if   directive['action'] == LINK: os.symlink     (abs_source, target)
-                        elif directive['action'] == COPY: shutil.copyfile(abs_source, target)
-                        elif directive['action'] == MOVE: shutil.move    (abs_source, target)
+                        if directive['action'] == LINK:
+                            # This is probably not a brilliant idea, so at least give a warning
+                            os.symlink(abs_source, target)
+                        elif directive['action'] == COPY:
+                            shutil.copyfile(abs_source, target)
+                        elif directive['action'] == MOVE:
+                            shutil.move(abs_source, target)
                         else:
                             # FIXME: implement TRANSFER mode
                             raise NotImplementedError('Action %s not supported' % directive['action'])
 
                         log_message = "%s'ed %s to %s - success" %(directive['action'], abs_source, target)
                         self._log.info(log_message)
-
 
                     except Exception as e:
                         # If we catch an exception, assume the staging failed
@@ -4370,11 +4382,9 @@ class StageoutWorker(threading.Thread):
                         self._log.exception(log_message)
 
                         # If a staging directive fails, fail the CU also.
-                        UnitUpdater.update_unit(queue = self._update_queue, 
-                                                cu    = cu,
-                                                state = rp.FAILED,
-                                                msg   = log_message)
-
+                        UnitUpdater.update_unit_state(uid    = cu['_id'],
+                                                      state  = rp.FAILED,
+                                                      msg    = log_message)
 
                 if cu['UMGR_Output_Directives']:
                     next_state = rp.UMGR_STAGING_OUTPUT_PENDING,
@@ -4496,13 +4506,14 @@ class HeartbeatMonitor(threading.Thread):
                     fields = [COMMAND_FIELD]
                     )
 
-        commands = list()
         if retdoc:
             commands = retdoc[COMMAND_FIELD]
+        else:
+            return
 
         for command in commands:
 
-            rpu.prof('Monitor get command', msg=[command[COMMAND_TYPE], command[COMMAND_ARG]])
+            rpu.prof('Monitor get command', msg=str([command[COMMAND_TYPE], command[COMMAND_ARG]]))
 
             if command[COMMAND_TYPE] == COMMAND_CANCEL_PILOT:
                 self.stop()

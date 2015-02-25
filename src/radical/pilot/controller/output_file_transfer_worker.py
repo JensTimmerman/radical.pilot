@@ -104,13 +104,13 @@ class OutputFileTransferWorker(threading.Thread):
                     time.sleep(IDLE_TIME)
                 else:
                     logger.info("OFTW cu found, progressing ...")
+                    compute_unit_id = None
                     try:
                         # We have found a new CU. Now we can process the transfer
                         # directive(s) wit SAGA.
                         compute_unit_id = str(compute_unit["_id"])
                         remote_sandbox = compute_unit["sandbox"]
-                        staging_directives = compute_unit["description"]["output_staging"]
-
+                        staging_directives = compute_unit["FTW_Output_Directives"]
 
                         logger.info("Processing output file transfers for ComputeUnit %s" % compute_unit_id)
                         # Loop over all staging directives and execute them.
@@ -189,13 +189,13 @@ class OutputFileTransferWorker(threading.Thread):
                         ts = datetime.datetime.utcnow()
                         log_message = "Output transfer failed: %s" % e
                         # TODO: not only mark the CU as failed, but also the specific Directive
-                        um_col.update(
-                            {'_id': compute_unit_id},
-                            {'$set': {'state': FAILED},
-                             '$push': {'statehistory': {'state': FAILED, 'timestamp': ts}},
-                             '$push': {'log': {'message': log_message, 'timestamp': ts}}
+                        um_col.update({'_id': compute_unit_id}, {
+                            '$set': {'state': FAILED},
+                            '$push': {
+                                'statehistory': {'state': FAILED, 'timestamp': ts},
+                                'log': {'message': log_message, 'timestamp': ts}
                             }
-                        )
+                        })
                         logger.exception (log_message)
 
 
@@ -248,7 +248,10 @@ class OutputFileTransferWorker(threading.Thread):
                 ts = datetime.datetime.utcnow()
                 um_col.find_and_modify(
                     query={"unitmanager": self.unit_manager_id,
-                           "Agent_Output_Status": { "$in": [ None, DONE ] },
+                           # TODO: Now that our state model is linear,
+                           # we probably don't need to check Agent_Output_Status anymore.
+                           # Given that it is not updates by the agent currently, disable it here.
+                           #"Agent_Output_Status": { "$in": [ None, DONE ] },
                            "FTW_Output_Status": { "$in": [ None, DONE ] },
                            "state": STAGING_OUTPUT
                     },
