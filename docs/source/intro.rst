@@ -22,7 +22,7 @@ but can execute directly on the ``ComputePilots``.
 RADICAL-Pilot also supports execution of parallel executables, for example based on
 MPI or OpenMP.
 
-.. image:: architecture.png
+.. image:: architecture_rp.png
 
 RADICAL-Pilot is not a static system, but it rather provides the user with a
 programming library ("Pilot-API") that  provides abstractions for resource
