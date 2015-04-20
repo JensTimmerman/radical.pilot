@@ -1,16 +1,15 @@
 #!/usr/bin/env python
 
 import os
+import saga
 import sys
 import pprint
-import pymongo
 import radical.utils       as ru
 import radical.pilot       as rp
 import radical.pilot.utils as rpu
 
 
-_DEFAULT_DBURL = 'mongodb://localhost:27017/radicalpilot/'
-_DEFAULT_DBURL = 'mongodb://ec2-184-72-89-141.compute-1.amazonaws.com:27017/radicalpilot/'
+_DEFAULT_DBURL = 'mongodb://user:password@ec2-184-72-89-141.compute-1.amazonaws.com:27017/radicalpilot/'
 
 if  'RADICAL_PILOT_DBURL' in os.environ :
     _DEFAULT_DBURL = os.environ['RADICAL_PILOT_DBURL']
@@ -46,11 +45,11 @@ _EVENT_ENCODING = {
         }, 
         'unit': {
             rp.NEW                     :  1,
-            rp.UNSCHEDULED             :  2,
+            rp.SCHEDULING              :  2,
             rp.PENDING_INPUT_STAGING   :  3,
             rp.STAGING_INPUT           :  4,
             rp.PENDING_EXECUTION       :  5,
-            rp.SCHEDULING              :  6,
+            rp.ALLOCATING              :  6,
             rp.EXECUTING               :  7,
             rp.PENDING_OUTPUT_STAGING  :  8,
             rp.STAGING_OUTPUT          :  9,
@@ -78,6 +77,7 @@ _EVENT_ENCODING = {
 # 
 # PENDING_EXECUTION           
 # SCHEDULING                  
+# ALLOCATING
 # EXECUTING                   
 # 
 # PENDING_OUTPUT_TRANSFER     
@@ -101,11 +101,13 @@ def usage (msg=None, noexit=False) :
         print "\n      Error: %s" % msg
 
     print """
-      usage     : %s -m <mode> [-d dburl] [-s session]
-      example   : %s -m stat    -d mongodb://localhost/radicalpilot -s 536afe101d41c83696ea0135
+      usage     : %s -m <mode>[,<mode>] [-d <dburl>] [-s <session>[,<session>]]
 
+      examples  : %s -m stat -d mongodb://user:password@localhost/radicalpilot -s 536afe101d41c83696ea0135
+                  %s -m list -d mongodb://user:password@localhost/radicalpilot
+                  %s -m prof -s 536afe101d41c83696ea0135,536afe101d41c83696ea0136
 
-      modes     :
+      mode(s)   :
 
         help    : show this message
         list    : show  a  list   of sessions in the database
@@ -114,14 +116,16 @@ def usage (msg=None, noexit=False) :
         sort    : show  a  list   of session objects, sorted by type
         hist    : show timeline   of session history
         stat    : show statistics of session history
+        prof    : collect agent profiling file of session
         plot    : save gnuplot representing session history
 
 
       arguments :
         
         -d      : database URL
-        -s      : session id
-        -c      : session cache file (also needs -s)
+        -s      : session id(s)
+        -c      : cachedir where <sid>.json caches are kept
+        -p      : profile directory where <sid-pid>.prof files are kept
         -f      : filter for listings
         -t      : terminal type for plotting (pdf and/or png, default is both)
 
@@ -134,11 +138,14 @@ def usage (msg=None, noexit=False) :
         'pilots > n' : only list sessions with more  than 'n' pilots
         'pilots < n' : only list sessions with fewer than 'n' pilots
 
-      The default command is 'list'.  If no session ID is specified, operations
-      which apply to a single session will choose the last session in the given
-      DB.  The default MongoDB is '%s'
-      
-""" % (sys.argv[0], sys.argv[0], _DEFAULT_DBURL)
+      Notes     :
+
+        The default mode is 'list'.
+        The default MongoDB is '%s'
+        Multiple modes can be specified as <mode>,<mode>,...
+        For mode 'prof', multiple session ids can be specified as <session>,<session>,...
+
+""" % (sys.argv[0], sys.argv[0], sys.argv[0], sys.argv[0], _DEFAULT_DBURL)
 
     if  msg :
         sys.exit (1)
@@ -149,26 +156,22 @@ def usage (msg=None, noexit=False) :
 
 # ------------------------------------------------------------------------------
 #
-def dump_session (db, dbname, session, cache) :
+def dump_session (db, dbname, session, cachedir) :
 
     print "session : %s" % session
-    handle_session (db, 'dump', dbname, session, cache, None)
+    handle_session (db, 'dump', dbname, session, cachedir, None)
 
 
 # ------------------------------------------------------------------------------
 #
-def tree_session (db, dbname, session, cache) :
+def tree_session (db, dbname, session, cachedir) :
 
-    handle_session (db, 'tree', dbname, session, cache, None)
+    handle_session (db, 'tree', dbname, session, cachedir, None)
 
 
 # ------------------------------------------------------------------------------
 #
-def list_sessions (db, session, cache, filters) :
-
-    if  session :
-        print "invalid session parameter on 'list'"
-        sys.exit (-1)
+def list_sessions (db, cachedir, filters) :
 
     sids = rpu.get_session_ids (db)
 
@@ -183,7 +186,7 @@ def list_sessions (db, session, cache, filters) :
 
             for sid in sids :
 
-                docs     = rpu.get_session_docs (db, sid)
+                docs     = rpu.get_session_docs (db, sid, cachedir=cachedir)
                 n_pilots = 0
 
                 for doc in docs['pilot'] :
@@ -209,9 +212,9 @@ def list_sessions (db, session, cache, filters) :
 
 
 # ------------------------------------------------------------------------------
-def sort_session (db, session, cache) :
+def sort_session (db, session, cachedir) :
 
-    docs = rpu.get_session_docs (db, session, cache)
+    docs = rpu.get_session_docs (db, session, cachedir=cachedir)
 
     print "pilot managers :" 
     for doc in docs['pmgr'] :
@@ -231,10 +234,10 @@ def sort_session (db, session, cache) :
 
 
 # ------------------------------------------------------------------------------
-def hist_session (db, session, cache) :
+def hist_session (db, session, cachedir) :
 
-    events    = rpu.get_session_events   (db, session, cache)
-    slothists = rpu.get_session_slothist (db, session, cache)
+    events    = rpu.get_session_events   (db, session, cachedir=cachedir)
+    slothists = rpu.get_session_slothist (db, session, cachedir=cachedir)
 
     if  not events :
         print "no events found for session %s" % session
@@ -270,10 +273,10 @@ def get_stats (docs, events, slothist) :
     n_units               = 0
     n_pilots              = 0
     unit_state_durations  = dict()
-    pilot_utilization     = dict()
+    pilot_stats           = dict()
     units                 = dict()
 
-    pilot_utilization['pilots'] = dict()
+    pilot_stats['pilots'] = dict()
 
     for cu in docs['unit'] :
         units[str(cu['_id'])] = cu
@@ -282,12 +285,13 @@ def get_stats (docs, events, slothist) :
 
         n_pilots   += 1
         pid         = str(doc['_id'])
-        pilot_util  = dict()
+        pilot_info  = dict()
 
-        pilot_util['resource']     = doc['description']['resource']
-        pilot_util['n_units']      = 0
-        pilot_util['unit_states']  = dict()
-        pilot_util['pilot_states'] = list()
+        pilot_info['resource']     = doc['description']['resource']
+        pilot_info['cores']        = doc['description']['cores']
+        pilot_info['n_units']      = 0
+        pilot_info['unit_states']  = dict()
+        pilot_info['pilot_states'] = list()
 
         # we assume that states are time-ordered
         state = doc['statehistory'][0]['state']
@@ -295,7 +299,7 @@ def get_stats (docs, events, slothist) :
         for t in doc['statehistory'][1:] :
             ts = t['timestamp']
             s  = t['state']
-            pilot_util['pilot_states'].append ({'state'    : state, 
+            pilot_info['pilot_states'].append ({'state'    : state, 
                                                 'duration' : ru.time_diff(start, ts)})
             state = s
             start = ts
@@ -303,7 +307,7 @@ def get_stats (docs, events, slothist) :
         for cu in doc['unit_ids'] :
             uid                    = str(cu)
             n_units               += 1
-            pilot_util['n_units'] += 1
+            pilot_info['n_units'] += 1
 
             if  not uid in units :
                 print 'unknonwn unit %s' % uid
@@ -317,71 +321,155 @@ def get_stats (docs, events, slothist) :
                 ts = t['timestamp']
                 s  = t['state']
 
-                if not state in pilot_util['unit_states'] :
-                    pilot_util['unit_states'][state]        = dict()
-                    pilot_util['unit_states'][state]['dur'] = list()
+                if not state in pilot_info['unit_states'] :
+                    pilot_info['unit_states'][state]        = dict()
+                    pilot_info['unit_states'][state]['dur'] = list()
 
-                pilot_util['unit_states'][state]['dur'].append (ru.time_diff(start, ts))
+                pilot_info['unit_states'][state]['dur'].append (ru.time_diff(start, ts))
                 state = s
                 start = ts
 
-        for s in pilot_util['unit_states'] :
+        pilot_runtime = (doc['finished'] - doc['started']) * pilot_info['cores']
+        pilot_busy = 0.0
+        if pid in slothist:
+            for slot in slothist[pid]['slot_infos'] :
+                for slot_used in slothist[pid]['slot_infos'][slot] :
+                    pilot_busy += slot_used[1] - slot_used[0]
+
+        pilot_info['started']     = doc['started']
+        pilot_info['finished']    = doc['finished']
+        pilot_info['cpu_burned']  = pilot_runtime
+        pilot_info['cpu_used']    = pilot_busy
+        pilot_info['utilization'] = pilot_busy * 100 / pilot_runtime
+
+        for s in pilot_info['unit_states'] :
             import numpy
-            array = numpy.array (pilot_util['unit_states'][s]['dur'])
-            pilot_util['unit_states'][s]['num' ] = len        (array)
-            pilot_util['unit_states'][s]['mean'] = numpy.mean (array)
-            pilot_util['unit_states'][s]['std' ] = numpy.std  (array)
-            pilot_util['unit_states'][s]['dur' ] = list()
+            array = numpy.array (pilot_info['unit_states'][s]['dur'])
+            pilot_info['unit_states'][s]['num' ] = len        (array)
+            pilot_info['unit_states'][s]['mean'] = numpy.mean (array)
+            pilot_info['unit_states'][s]['std' ] = numpy.std  (array)
+            pilot_info['unit_states'][s]['dur' ] = list()
 
 
-        pilot_utilization['pilots'][pid] = pilot_util
+        pilot_stats['pilots'][pid] = pilot_info
 
-    pilot_utilization['n_pilots'] = n_pilots
+    pilot_stats['n_pilots'] = n_pilots
 
-    return pilot_utilization
-
-
+    return pilot_stats
 
     
 # ------------------------------------------------------------------------------
-def stat_session (db, session, cache) :
+def stat_session (db, session, cachedir) :
 
-    docs      = rpu.get_session_docs     (db, session, cache)
-    events    = rpu.get_session_events   (db, session, cache)
-    slothists = rpu.get_session_slothist (db, session, cache)
+    docs       = rpu.get_session_docs     (db, session, cachedir=cachedir)
+    events     = rpu.get_session_events   (db, session, cachedir=cachedir)
+    slothists  = rpu.get_session_slothist (db, session, cachedir=cachedir)
 
-    stats     = get_stats (docs, events, slothists)
+    stats      = get_stats (docs, events, slothists)
+
+    t_x_start  = None   # first unit started executing
+    t_y_start  = None   # last  unit started executing
+    t_x_stop   = None   # last unit finished executing
+    unit_cores = dict() # sum of core counts from all units per pilot
+
+    for unit in docs['unit'] :
+        if not t_x_start : t_x_start =     unit['started']
+        else             : t_x_start = min(unit['started'],  t_x_start)
+        if not t_y_start : t_y_start =     unit['started']
+        else             : t_y_start = max(unit['started'],  t_y_start)
+        if not t_x_stop  : t_x_stop  =     unit['finished']
+        else             : t_x_stop  = max(unit['finished'], t_x_stop )
+
+        pid = unit.get ('pilot', 'None')
+        if not pid in unit_cores : unit_cores[pid]  = unit['description'].get ('cores', 1)
+        else                     : unit_cores[pid] += unit['description'].get ('cores', 1)
+
+    t_0  = docs['session']['created']  # session started (absolute time)
+    t_h  = t_x_start - t_0             # session start 'til first execution
+    t_x  = t_x_stop  - t_x_start       # first start 'til last stop  of unit execution
+    t_xy = t_y_start - t_x_start       # first start 'til last start of unit execution
+
+    session_name = docs['session']['name']
 
     print "Session Statistics"
     print "------------------"
     print ""
-    print "  pilots : %s" % stats['n_pilots']
+    print "  session: %s"    % session_name
+    print "  pilots : %s"    % stats['n_pilots']
+    print "  t_0    : %12.1fs" % t_0
+    print "  t_h    : %12.1fs" % t_h
+    print "  t_x    : %12.1fs" % t_x
+    print "  t_xy   : %12.1fs" % t_xy
 
     for pid in stats['pilots'] :
 
         pilot = stats['pilots'][pid]
 
-        print "  pilot [%s] [%s]" % (pid, pilot['resource'])
+        print "  pilot [%s] [%s]"       % (pid, pilot['resource'])
+        print "      cores       : %6d" % pilot['cores']
+        print "      units       : %6d" % pilot['n_units']
+        print "      units*cores : %6s" % unit_cores.get (pid, '-')
+
+        if unit_cores.get (pid, 0) <= pilot['cores'] :
+            urate = pilot['n_units'] / t_xy
+            print "      unit-rate   : %8.1f/sec" % urate
+
+        print "      utilization : %8.1f%%" % pilot['utilization']
         print "      pilot states:"
         for ps in pilot['pilot_states'] :
             print "        state %-18s : %10.1fs" % (ps['state'], ps['duration'])
-        print "      units : %d" % pilot['n_units']
-        print "      unit states:"
+        print "      unit states :"
         for us  in pilot['unit_states'] :
             data = pilot['unit_states'][us]
             print "        state %-18s : %10.1fs  +/- %8.1fs" % (us, data['mean'], data['std'])
 
 
+# ------------------------------------------------------------------------------
+def prof_session(db, sessions, cachedir, profdir):
+
+    print ""
+    print "Collecting agent profiling data"
+    print "-------------------------------"
+    print ""
+
+    for session in sessions.split(','):
+
+        json_docs = rpu.get_session_docs(db, session, cachedir)
+
+        pilots = json_docs['pilot']
+        num_pilots = len(pilots)
+        print "Session: %s" % session
+        print "Number of pilots in session: %d" % num_pilots
+
+        for pilot in pilots:
+
+            print "Processing pilot '%s'" % pilot['_id']
+
+            sandbox = pilot['sandbox']
+            pilot_id = os.path.basename(os.path.dirname(sandbox))
+
+            src = sandbox + 'agent.prof'
+            dst = 'file://%s/%s.prof' % (profdir, pilot_id)
+
+            print "Copying '%s' to '%s'." % (src, dst)
+            prof_file = saga.filesystem.File(src)
+            prof_file.copy(dst)
+
+        print ""
+
 
 # ------------------------------------------------------------------------------
-def plot_session (db, session, cache, term) :
+def plot_session (db, session, cachedir, term) :
     """
     plot results :P
     """
 
-    docs      = rpu.get_session_docs     (db, session, cache)
-    events    = rpu.get_session_events   (db, session, cache)
-    slothists = rpu.get_session_slothist (db, session, cache)
+    docs      = rpu.get_session_docs     (db, session, cachedir=cachedir)
+    events    = rpu.get_session_events   (db, session, cachedir=cachedir)
+    slothists = rpu.get_session_slothist (db, session, cachedir=cachedir)
+
+    session_name = docs['session']['name']
+
 
     if  not events :
         print "no events found for session %s" % session
@@ -428,8 +516,12 @@ def plot_session (db, session, cache, term) :
     for pilot in pilot_docs :
 
         pid = str(pilot['_id'])
-        pids.append (pid)
+        pids.append  (pid)
         hosts.append (ru.Url (pilot['sandbox']).host.split('.')[0])
+
+        slotnum = pilot['description']['cores']
+        maxslots = max(slotnum,maxslots)
+        slots.append (slotnum)
 
         with open ("/tmp/rp.%s.pilot.states.%s.dat" % (session, pid), "w") as dat :
             for event in pilot['statehistory'] :
@@ -514,48 +606,27 @@ def plot_session (db, session, cache, term) :
 
         with open ("/tmp/rp.%s.pilot.slots.%s.dat" % (session, pid), "w") as dat :
 
-            if  not 'slothistory' in pilot :
-                slots.append (0)
+            if pid in slothists:
+                slothist = slothists[pid]
 
+                slot_idx = 0
+                for slot in slothist['slots'] :
 
-            else :
-
-                slotidxs = list()
-                slotstr  = pilot['slothistory'][0]
-                slotnum  = slotstr.count ('-') + slotstr.count ('+')
-
-                nodesize = max (nodesize, pilot['cores_per_node'])
-                maxslots = max (maxslots, slotnum)
-                slots.append (slotnum)
-
-                for idx in range (0, len(slotstr)) :
-                    if  slotstr[idx] in ['-', '+'] :
-                        slotidxs.append (idx)
-
-                for number,slotidx in enumerate(slotidxs) :
-
+                    slot_idx += 1
                     used = False
-                    for entry in pilot['slothistory'][1:] :
 
-                        seconds   = ru.time_diff (start, entry[0])
-                        maxtime   = max (maxtime, seconds)
-                        slotstate = entry[1][slotidx]
+                    for entry in slothist['slot_infos'][slot] :
 
-                        if  slotstate == '-' : 
-                            if  used :
-                                dat.write ("%10.2f  %6d\n" % (seconds, number+1))
-                                dat.write ("\n")
-                                used = False
+                        busy_start = ru.time_diff (start, entry[0])
+                        busy_stop  = ru.time_diff (start, entry[1])
 
-                        elif  slotstate == '+' : 
-                            dat.write ("%10.2f  %6d\n" % (seconds, number+1))
-                            used = True
-
-                        else :
-                            print "oops?  invalid slotstate '%s'" % slotstate
+                        dat.write ("%10.2f  %6d\n" % (busy_start, slot_idx))
+                        dat.write ("%10.2f  %6d\n" % (busy_stop,  slot_idx))
+                        dat.write ("\n")
 
                     dat.write ("\n")
-                delete_me.append (dat.name)
+
+            delete_me.append (dat.name)
 
     pilotnum = len(pids)
 
@@ -593,6 +664,9 @@ def plot_session (db, session, cache, term) :
         slotsscale = maxslots+(nodesize/2)
         queuescale = maxqueue+(nodesize/2)
 
+    slotsscale = int(max(slotsscale, maxslots*1.1))
+    queuescale = int(max(queuescale, maxqueue*1.1))
+
     terms = " ".join (term.split (','))
 
                                          
@@ -609,11 +683,12 @@ def plot_session (db, session, cache, term) :
     cmd +=        "\"'"
     cmd +=        " -e  nodesize=%d "       % nodesize
     cmd +=        " -e 'session=\"%s\"' "   % session
-    cmd +=        " -e  'terms=\"%s\"' "    % terms
+    cmd +=        " -e 'sname=\"%s\"' "     % session_name
+    cmd +=        " -e 'terms=\"%s\"' "     % terms
     cmd +=        " -e 'plottitle=\"RADICAL-Pilot\\n============="
     if plotname :
         cmd +=    "\\n[%s]" % plotname
-    cmd +=        "\\nPilot and Unit Event Traces\"'  "
+    cmd +=        "\\nPilot and Unit Event Traces\\nSession %s\"' " % session_name
     cmd +=        " -e  pilot_num=%d "       % len(pids)
     cmd +=        " -e  'pilot_name_list=\""
     for idx,pid in enumerate(pids) :
@@ -625,7 +700,7 @@ def plot_session (db, session, cache, term) :
     cmd +=        "\"'"
     cmd +=        "     %s "                        % plotfile
 
-    print cmd
+  # print cmd
     print "\nplotting..."
     os.system (cmd) 
 
@@ -656,11 +731,11 @@ def plot_session (db, session, cache, term) :
     END    = "<"
     ONCE   = "!"
     COLORS = {rp.NEW                     : ' 1',
-              rp.UNSCHEDULED             : ' 2',
+              rp.SCHEDULING              : ' 2',
               rp.PENDING_INPUT_STAGING   : ' 3',
               rp.STAGING_INPUT           : ' 4',
               rp.PENDING_EXECUTION       : ' 5',
-              rp.SCHEDULING              : ' 6',
+              rp.ALLOCATING              : ' 6',
               rp.EXECUTING               : ' 7',
               rp.PENDING_OUTPUT_STAGING  : ' 8',
               rp.STAGING_OUTPUT          : ' 9',
@@ -791,12 +866,12 @@ def plot_session (db, session, cache, term) :
 
 
 # ------------------------------------------------------------------------------
-def handle_session (db, mode, dbname, session, cache, pname) :
+def handle_session (db, mode, dbname, session, cachedir, pname) :
     """
     For the given db, traverse collections
     """
 
-    # FIXME: cache is not used
+    # FIXME: cache(dir) is not used
 
     print " +-- db   %s" % dbname
 
@@ -907,7 +982,8 @@ if __name__ == '__main__' :
     parser.add_option('-s', '--session',   dest='session')
     parser.add_option('-d', '--dburl',     dest='url')
     parser.add_option('-m', '--mode',      dest='mode')
-    parser.add_option('-c', '--cache',     dest='cache')
+    parser.add_option('-c', '--cachedir',  dest='cachedir')
+    parser.add_option('-p', '--profdir',   dest='profdir')
     parser.add_option('-f', '--filter',    dest='filters')
     parser.add_option('-t', '--terminal',  dest='term')
     parser.add_option('-h', '--help',      dest='help', action="store_true")
@@ -938,12 +1014,13 @@ if __name__ == '__main__' :
         options.url = default_dburl
 
 
-    mode    = options.mode 
-    url     = options.url
-    session = options.session
-    cache   = options.cache
-    filters = options.filters
-    term    = options.term
+    mode     = options.mode 
+    url      = options.url
+    session  = options.session
+    filters  = options.filters
+    term     = options.term
+    cachedir = options.cachedir
+    profdir  = options.profdir
 
     if  not term :
         term = "pdf,png"
@@ -952,34 +1029,43 @@ if __name__ == '__main__' :
     if  not url.path or '/' == url.path :
         url.path = 'radicalpilot'
 
-    print  url
+    if  not cachedir :
+        cachedir = os.getcwd ()
 
-    mongo, db, dbname, cname, pname = ru.mongodb_connect (str(url), default_dburl)
+    if not profdir:
+        profdir = os.getcwd()
+
+    if  not os.path.isdir (cachedir) :
+        usage ("%s is no valid cachedir" % cachedir)
+
+    if not os.path.isdir(profdir) :
+        usage ("%s is no valid directory to store profile data" % profdir)
 
     print "modes   : %s" % mode
     print "db url  : %s" % url
+    print "cachedir: %s" % cachedir
+    mongo, db, dbname, cname, pname = ru.mongodb_connect (str(url), default_dburl)
 
-    if  not session and mode != 'list' :
-        session = rpu.get_last_session  (db)
-        print "session : %s (last session in database)" % session
-    else :
+    if not session and mode != 'list' :
+        usage("mode %s needs a session id specified" % mode)
+    elif session and mode == 'list':
+        usage("invalid session parameter '%s' on mode 'list'" % session)
+    else:
         print "session : %s" % session
-
-    if  not session and cache :
-        print "ignore cache '%s' -- no session ID specified" % cache
 
     for m in mode.split (',') :
 
-        if  m not in ['list', 'dump', 'tree', 'hist', 'sort', 'stat', 'plot', 'help'] : 
+        if  m not in ['list', 'dump', 'tree', 'hist', 'sort', 'stat', 'prof', 'plot', 'help'] :
             usage ("Unsupported mode '%s'" % m)
 
-        if   m == 'list' : list_sessions (db, session, cache, filters)
-        elif m == 'tree' : tree_session  (db, dbname, session, cache) 
-        elif m == 'dump' : dump_session  (db, dbname, session, cache)
-        elif m == 'sort' : sort_session  (db, session, cache)
-        elif m == 'hist' : hist_session  (db, session, cache)
-        elif m == 'stat' : stat_session  (db, session, cache)
-        elif m == 'plot' : plot_session  (db, session, cache, term)
+        if   m == 'list' : list_sessions (db, cachedir, filters)
+        elif m == 'tree' : tree_session  (db, dbname, session, cachedir) 
+        elif m == 'dump' : dump_session  (db, dbname, session, cachedir)
+        elif m == 'sort' : sort_session  (db, session, cachedir)
+        elif m == 'hist' : hist_session  (db, session, cachedir)
+        elif m == 'stat' : stat_session  (db, session, cachedir)
+        elif m == 'prof' : prof_session  (db, session, cachedir, profdir)
+        elif m == 'plot' : plot_session  (db, session, cachedir, term)
         elif m == 'help' : usage (noexit=True)
         else             : usage ("unknown mode '%s'" % mode)
 

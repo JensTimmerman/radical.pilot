@@ -14,10 +14,9 @@ __license__   = "MIT"
 
 # ------------------------------------------------------------------------------
 # Scheduler name constant
-from types import *
-from states import *
-from logentry import * 
-
+from types     import *
+from states    import *
+from logentry  import * 
 from scheduler import *
 
 # ------------------------------------------------------------------------------
@@ -41,5 +40,23 @@ from staging_directives import COPY, LINK, MOVE, TRANSFER, SKIP_FAILED, CREATE_P
 
 # ------------------------------------------------------------------------------
 #
-from utils.version             import version, version_detail
 from utils.logger              import logger
+
+import os
+
+import radical.utils        as ru
+import radical.utils.logger as rul
+
+
+pwd     = os.path.dirname (__file__)
+root    = "%s/.." % pwd
+version, version_detail, version_branch, sdist_name, sdist_path = ru.get_version ([root, pwd])
+
+# FIXME: the logger init will require a 'classical' ini based config, which is
+# different from the json based config we use now.   May need updating once the
+# radical configuration system has changed to json
+_logger = rul.logger.getLogger  ('radical.pilot')
+_logger.info ('radical.pilot        version: %s' % version_detail)
+
+# ------------------------------------------------------------------------------
+

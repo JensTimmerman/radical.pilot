@@ -12,7 +12,9 @@ __copyright__ = "Copyright 2013-2014, http://radical.rutgers.edu"
 __license__   = "MIT"
 
 import os 
+import bson
 import glob
+import copy
 import saga
 import radical.utils as ru
 
@@ -25,9 +27,6 @@ from radical.pilot.exceptions      import PilotException
 
 from radical.pilot.db              import Session as dbSession
 from radical.pilot.db              import DBException
-
-from bson.objectid                 import ObjectId
-
 
 
 # ------------------------------------------------------------------------------
@@ -80,7 +79,7 @@ class Session (saga.Session, Object):
     **Example**::
 
         s1 = radical.pilot.Session(database_url=DBURL)
-        s2 = radical.pilot.Session(database_url=DBURL, session_uid=s1.uid)
+        s2 = radical.pilot.Session(database_url=DBURL, uid=s1.uid)
 
         # s1 and s2 are pointing to the same session
         assert s1.uid == s2.uid
@@ -88,11 +87,12 @@ class Session (saga.Session, Object):
 
     #---------------------------------------------------------------------------
     #
-    def __init__ (self, database_url=None, database_name="radicalpilot", session_uid=None):
+    def __init__ (self, database_url=None, database_name="radicalpilot",
+                  uid=None, name=None):
         """Creates a new or reconnects to an exising session.
 
-        If called without a session_uid, a new Session instance is created and 
-        stored in the database. If session_uid is set, an existing session is 
+        If called without a uid, a new Session instance is created and 
+        stored in the database. If uid is set, an existing session is 
         retrieved from the database. 
 
         **Arguments:**
@@ -103,8 +103,10 @@ class Session (saga.Session, Object):
             * **database_name** (`string`): An alternative database name 
               (default: 'radicalpilot').
 
-            * **session_uid** (`string`): If session_uid is set, we try 
+            * **uid** (`string`): If uid is set, we try 
               re-connect to an existing session instead of creating a new one.
+
+            * **name** (`string`): An optional human readable name.
 
         **Returns:**
             * A new Session instance.
@@ -163,31 +165,39 @@ class Session (saga.Session, Object):
         config_files  = glob.glob(default_cfgs)
 
         for config_file in config_files:
-            rcs = ResourceConfig.from_file(config_file)
 
-            if  rcs :
-                for rc in rcs:
-                    logger.info("Loaded resource configurations for %s" % rc)
-                    self._resource_configs[rc] = rcs[rc].as_dict() 
+            try :
+                rcs = ResourceConfig.from_file(config_file)
+            except Exception as e :
+                logger.error ("skip config file %s: %s" % (config_file, e))
+                continue
+
+            for rc in rcs:
+                logger.info("Loaded resource configurations for %s" % rc)
+                self._resource_configs[rc] = rcs[rc].as_dict() 
 
         user_cfgs     = "%s/.radical/pilot/configs/*.json" % os.environ.get ('HOME')
         config_files  = glob.glob(user_cfgs)
 
         for config_file in config_files:
-            rcs = ResourceConfig.from_file(config_file)
 
-            if  rcs :
-                for rc in rcs:
-                    logger.info("Loaded resource configurations for %s" % rc)
+            try :
+                rcs = ResourceConfig.from_file(config_file)
+            except Exception as e :
+                logger.error ("skip config file %s: %s" % (config_file, e))
+                continue
 
-                    if  rc in self._resource_configs :
-                        # config exists -- merge user config into it
-                        ru.dict_merge (self._resource_configs[rc],
-                                       rcs[rc].as_dict(),
-                                       policy='overwrite')
-                    else :
-                        # new config -- add as is
-                        self._resource_configs[rc] = rcs[rc].as_dict() 
+            for rc in rcs:
+                logger.info("Loaded resource configurations for %s" % rc)
+
+                if  rc in self._resource_configs :
+                    # config exists -- merge user config into it
+                    ru.dict_merge (self._resource_configs[rc],
+                                   rcs[rc].as_dict(),
+                                   policy='overwrite')
+                else :
+                    # new config -- add as is
+                    self._resource_configs[rc] = rcs[rc].as_dict() 
 
         default_aliases = "%s/configs/aliases.json" % module_path
         self._resource_aliases = ru.read_json_str (default_aliases)['aliases']
@@ -195,19 +205,29 @@ class Session (saga.Session, Object):
         ##########################
         ## CREATE A NEW SESSION ##
         ##########################
-        if session_uid is None:
+        if uid is None:
             try:
-                self._uid = str(ObjectId())
-                self._last_reconnect = None
+                self._connected  = None
+
+                if name :
+                    self._name = name
+                    self._uid  = name
+                  # self._uid  = ru.generate_id ('rp.session.'+name+'.%(item_counter)06d', mode=ru.ID_CUSTOM)
+                else :
+                    self._uid  = ru.generate_id ('rp.session', mode=ru.ID_PRIVATE)
+                    self._name = self._uid
+
 
                 self._dbs, self._created, self._connection_info = \
-                        dbSession.new(sid=self._uid,
-                                      db_url=self._database_url,
-                                      db_name=database_name)
+                        dbSession.new(sid     = self._uid,
+                                      name    = self._name,
+                                      db_url  = self._database_url,
+                                      db_name = database_name)
 
                 logger.info("New Session created%s." % str(self))
 
             except Exception, ex:
+                logger.exception ('session create failed')
                 raise PilotException("Couldn't create new session (database URL '%s' incorrect?): %s" \
                                 % (self._database_url, ex))  
 
@@ -216,7 +236,7 @@ class Session (saga.Session, Object):
         ######################################
         else:
             try:
-                self._uid = session_uid
+                self._uid = uid
 
                 # otherwise, we reconnect to an existing session
                 self._dbs, session_info, self._connection_info = \
@@ -224,13 +244,19 @@ class Session (saga.Session, Object):
                                             db_url=self._database_url,
                                             db_name=database_name)
 
-                self._created          = session_info["created"]
-                self._last_reconnect   = session_info["last_reconnect"]
+                self._created   = session_info["created"]
+                self._connected = session_info["connected"]
 
                 logger.info("Reconnected to existing Session %s." % str(self))
 
             except Exception, ex:
                 raise PilotException("Couldn't re-connect to session: %s" % ex)  
+
+    #---------------------------------------------------------------------------
+    #
+    def __del__ (self) :
+        self.close ()
+
 
     #---------------------------------------------------------------------------
     #
@@ -250,7 +276,7 @@ class Session (saga.Session, Object):
               or doesn't exist. 
         """
 
-        logger.error("session %s closing" % (str(self._uid)))
+        logger.debug("session %s closing" % (str(self._uid)))
 
         uid = self._uid
 
@@ -275,19 +301,19 @@ class Session (saga.Session, Object):
             terminate = True
 
         for pmgr in self._pilot_manager_objects:
-            logger.error("session %s closes   pmgr   %s" % (str(self._uid), pmgr._uid))
+            logger.debug("session %s closes   pmgr   %s" % (str(self._uid), pmgr._uid))
             pmgr.close (terminate=terminate)
-            logger.error("session %s closed   pmgr   %s" % (str(self._uid), pmgr._uid))
+            logger.debug("session %s closed   pmgr   %s" % (str(self._uid), pmgr._uid))
 
         for umgr in self._unit_manager_objects:
-            logger.error("session %s closes   umgr   %s" % (str(self._uid), umgr._uid))
+            logger.debug("session %s closes   umgr   %s" % (str(self._uid), umgr._uid))
             umgr.close()
-            logger.error("session %s closed   umgr   %s" % (str(self._uid), umgr._uid))
+            logger.debug("session %s closed   umgr   %s" % (str(self._uid), umgr._uid))
 
         if  cleanup :
             self._destroy_db_entry()
 
-        logger.error("session %s closed" % (str(self._uid)))
+        logger.debug("session %s closed" % (str(self._uid)))
 
 
     #---------------------------------------------------------------------------
@@ -296,12 +322,12 @@ class Session (saga.Session, Object):
         """Returns a Python dictionary representation of the object.
         """
         object_dict = {
-            "uid": self._uid,
-            "created": self._created,
-            "last_reconnect": self._last_reconnect,
-            "database_name": self._connection_info.dbname,
-            "database_auth": self._connection_info.dbauth,
-            "database_url" : self._connection_info.dburl
+            "uid"           : self._uid,
+            "created"       : self._created,
+            "connected"     : self._connected ,
+            "database_name" : self._connection_info.dbname,
+            "database_auth" : self._connection_info.dbauth,
+            "database_url"  : self._connection_info.dburl
         }
         return object_dict
 
@@ -315,6 +341,12 @@ class Session (saga.Session, Object):
     #---------------------------------------------------------------------------
     #
     @property
+    def name(self):
+        return self._name
+
+    #---------------------------------------------------------------------------
+    #
+    @property
     def created(self):
         """Returns the UTC date and time the session was created.
         """
@@ -324,12 +356,12 @@ class Session (saga.Session, Object):
     #---------------------------------------------------------------------------
     #
     @property
-    def last_reconnect(self):
+    def connected (self):
         """Returns the most recent UTC date and time the session was
         reconnected to.
         """
         self._assert_obj_is_valid()
-        return self._last_reconnect
+        return self._connected 
 
 
     #---------------------------------------------------------------------------
@@ -498,8 +530,7 @@ class Session (saga.Session, Object):
 
            For example::
 
-                  rc = radical.pilot.ResourceConfig
-                  rc.name                 = "mycluster"
+                  rc = radical.pilot.ResourceConfig(label="mycluster")
                   rc.job_manager_endpoint = "ssh+pbs://mycluster
                   rc.filesystem_endpoint  = "sftp://mycluster
                   rc.default_queue        = "private"
@@ -517,19 +548,20 @@ class Session (saga.Session, Object):
         """
         if  isinstance (resource_config, basestring) :
 
+            # let exceptions fall through
             rcs = ResourceConfig.from_file(resource_config)
 
-            if  rcs :
-                for rc in rcs:
-                    logger.info("Loaded resource configurations for %s" % rc)
-                    self._resource_configs[rc] = rcs[rc].as_dict() 
+            for rc in rcs:
+                logger.info("Loaded resource configurations for %s" % rc)
+                self._resource_configs[rc] = rcs[rc].as_dict() 
 
         else :
-            self._resource_configs [resource_config.name] = resource_config.as_dict()
+            print 'add rcfg as %s' % resource_config.label
+            self._resource_configs[resource_config.label] = resource_config.as_dict()
 
     # -------------------------------------------------------------------------
     #
-    def get_resource_config (self, resource_key):
+    def get_resource_config (self, resource_key, schema=None):
         """Returns a dictionary of the requested resource config
         """
 
@@ -542,5 +574,22 @@ class Session (saga.Session, Object):
             error_msg = "Resource key '%s' is not known." % resource_key
             raise PilotException(error_msg)
 
-        return self._resource_configs[resource_key]
+        resource_cfg = copy.deepcopy (self._resource_configs[resource_key])
+
+        if  not schema :
+            if 'schemas' in resource_cfg :
+                schema = resource_cfg['schemas'][0]
+
+        if  schema:
+            if  schema not in resource_cfg :
+                raise RuntimeError ("schema %s unknown for resource %s" \
+                                  % (schema, resource_key))
+
+            for key in resource_cfg[schema] :
+                # merge schema specific resource keys into the
+                # resource config
+                resource_cfg[key] = resource_cfg[schema][key]
+
+
+        return resource_cfg
 

@@ -1,3 +1,4 @@
+
 {
     "archer": {
         "description"                 : "The EPSRC Archer Cray XC30 system (https://www.archer.ac.uk/)",
@@ -11,14 +12,18 @@
         },
         "default_queue"               : "standard",
         "lrms"                        : "PBSPRO",
+        "agent_type"                  : "multicore",
+        "agent_scheduler"             : "CONTINUOUS",
+        "agent_spawner"               : "POPEN",
         "task_launch_method"          : "APRUN",
         "mpi_launch_method"           : "APRUN",
         "forward_tunnel_endpoint"     : "10.60.0.52",
-        "global_virtenv"              : "/work/e290/shared/shared_pilot_ve_20140703",
         "pre_bootstrap"               : ["module load python"],
         "default_remote_workdir"      : "/work/`id -gn`/`id -gn`/$USER",
         "valid_roots"                 : ["/work"],
-        "pilot_agent"                 : "radical-pilot-agent-multicore.py",
-        "bootstrapper"                : "default_bootstrapper.sh"
+        "virtenv"                     : "/work/e290/shared/shared_pilot_ve_20150325",
+        "virtenv_mode"                : "use",
+        "rp_version"                  : "debug"
     }
 }
+

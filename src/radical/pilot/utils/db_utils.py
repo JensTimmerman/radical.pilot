@@ -1,10 +1,12 @@
 
 import os
+import sys
 import time
 import datetime
 import pymongo
 
 import radical.utils as ru
+from   radical.pilot.states import *
 
 
 _CACHE_BASEDIR = '/tmp/rp_cache_%d/' % os.getuid ()
@@ -57,24 +59,25 @@ def get_last_session (db) :
 
 
 # ------------------------------------------------------------------------------
-def get_session_docs (db, sid, cache=None) :
+def get_session_docs (db, sid, cache=None, cachedir=None) :
 
     # session docs may have been cached in /tmp/rp_cache_<uid>/<sid>.json -- in that
     # case we pull it from there instead of the database, which will be much
     # quicker.  Also, we do cache any retrieved docs to that place, for later
-    # use.
+    # use.  An optional cachdir parameter changes that default location for
+    # lookup and storage.
+    if  not cachedir :
+        cachedir = _CACHE_BASEDIR
+
     if  not cache :
-        cache = "%s/%s.json" % (_CACHE_BASEDIR, sid)
-    else :
-        if  not os.path.isfile (cache) :
-            print "cache '%s' does not exist" % cache
-            return None
+        cache = "%s/%s.json" % (cachedir, sid)
 
     try :
-        return ru.read_json (cache)
+        if  os.path.isfile (cache) :
+            return ru.read_json (cache)
     except Exception as e :
-        # we can continue without cache, no problem
-        pass
+        # continue w/o cache
+        sys.stderr.write ("warning: cannot read session cache at %s (%s)\n" % (cache, e))
 
 
     # cache not used or not found -- go to db
@@ -118,8 +121,142 @@ def get_session_docs (db, sid, cache=None) :
     return json_data
 
 
+
 # ------------------------------------------------------------------------------
-def get_session_slothist (db, sid, cache=None) :
+#
+def get_session_frames (db, sids, cachedir=None) :
+
+    # use like this: 
+    #
+    # session_frame, pilot_frame, unit_frame = rpu.get_session_frames (db, session, cachedir)
+    # pandas.set_option('display.width', 1000)
+    # print session_frame
+    # print pilot_frame
+    # print unit_frame
+    #
+    # u_min = unit_frame.ix[unit_frame['started'].idxmin()]['started']
+    # u_max = unit_frame.ix[unit_frame['finished'].idxmax()]['finished']
+    # print u_min
+    # print u_max
+    # print u_max - u_min
+
+
+    if not isinstance (sids, list) :
+        sids = [sids]
+
+    session_dicts = list()
+    pilot_dicts   = list()
+    unit_dicts    = list()
+
+    for sid in sids :
+
+        docs = get_session_docs (db, sid, cachedir=cachedir)
+
+        session       = docs['session']
+        session_start = session['created']
+        session_dict  = {
+            'sid'       : sid,
+            'started'   : session['created'],
+            'finished'  : None, 
+            'n_pilots'  : len(docs['pilot']),
+            'n_units'   : 0
+            }
+
+        last_pilot_event = 0
+        for pilot in docs['pilot'] :
+
+            pid         = pilot['_id']
+            description = pilot.get ('description', dict())
+            started     = pilot.get ('started')
+            finished    = pilot.get ('finished')
+
+            if started  : started  -= session_start
+            if finished : finished -= session_start
+
+            pilot_dict = {
+                'sid'          : sid,
+                'pid'          : pid, 
+                'n_units'      : len(pilot.get ('unit_ids', list())), 
+                'started'      : started,
+                'finished'     : finished,
+                'resource'     : description.get ('resource'),
+                'cores'        : description.get ('cores'),
+                'runtime'      : description.get ('runtime'),
+                NEW            : None, 
+                PENDING_LAUNCH : None, 
+                LAUNCHING      : None, 
+                PENDING_ACTIVE : None, 
+                ACTIVE         : None, 
+                DONE           : None, 
+                FAILED         : None, 
+                CANCELED       : None
+            }
+
+            for entry in pilot.get('statehistory', list()):
+                state = entry['state']
+                timer = entry['timestamp'] - session_start
+                pilot_dict[state] = timer
+                last_pilot_event  = max(last_pilot_event, timer)
+
+            pilot_dicts.append (pilot_dict)
+
+
+        for unit in docs['unit']:
+
+            uid         = unit['_id']
+            started     = unit.get ('started')
+            finished    = unit.get ('finished')
+            description = unit.get ('description', dict())
+
+            if started  : started  -= session_start
+            if finished : finished -= session_start
+
+            session_dict['n_units'] += 1
+
+            unit_dict = {
+                'sid'                  : sid, 
+                'pid'                  : unit.get('pilot'), 
+                'uid'                  : uid, 
+                'started'              : started,
+                'finished'             : finished,
+                'cores'                : description.get ('cores'),
+                NEW                    : None, 
+                UNSCHEDULED            : None, 
+                PENDING_INPUT_STAGING  : None, 
+                STAGING_INPUT          : None, 
+                PENDING_EXECUTION      : None, 
+                SCHEDULING             : None, 
+                ALLOCATING             : None, 
+                EXECUTING              : None, 
+                PENDING_OUTPUT_STAGING : None, 
+                STAGING_OUTPUT         : None, 
+                DONE                   : None, 
+                FAILED                 : None, 
+                CANCELED               : None
+            }
+
+            for entry in unit.get('statehistory', list()):
+                state = entry['state']
+                timer = entry['timestamp'] - session_start
+                unit_dict[state] = timer
+
+            unit_dicts.append (unit_dict)
+        
+        session_dict['finished'] = last_pilot_event
+        session_dicts.append (session_dict)
+
+    import pandas 
+    session_frame = pandas.DataFrame (session_dicts)
+    pilot_frame   = pandas.DataFrame (pilot_dicts)
+    unit_frame    = pandas.DataFrame (unit_dicts)
+
+
+    return session_frame, pilot_frame, unit_frame
+
+
+# ------------------------------------------------------------------------------
+#
+def get_session_slothist (db, sid, cache=None, cachedir=None) :
     """
     For all pilots in the session, get the slot lists and slot histories. and
     return as list of tuples like:
@@ -128,35 +265,75 @@ def get_session_slothist (db, sid, cache=None) :
       tuple (string  , list (tuple (string  , int    ) ), list (tuple (string   , datetime ) ) )
     """
 
-    docs = get_session_docs (db, sid, cache)
+    docs = get_session_docs (db, sid, cache, cachedir)
 
-    ret = list()
+    ret = dict()
 
     for pilot_doc in docs['pilot'] :
 
         # slot configuration was only recently (v0.18) added to the RP agent...
         if  not 'slots' in pilot_doc :
-            return None
+            return ret
 
-        pid      = str(pilot_doc['_id'])
-        slots    =     pilot_doc['slots']
-        slothist =     pilot_doc['slothistory']
+        pilot_id     = pilot_doc['_id'] 
+        slot_names   = list()
+        slot_infos   = dict()
+        slot_started = dict()
 
-        slotinfo = list()
-        for hostinfo in slots :
-            hostname = hostinfo['node'] 
-            slotnum  = len (hostinfo['cores'])
-            slotinfo.append ([hostname, slotnum])
+        nodes   = pilot_doc['nodes']
+        n_cores = pilot_doc['cores_per_node']
 
-        ret.append ({'pilot_id' : pid, 
-                     'slotinfo' : slotinfo, 
-                     'slothist' : slothist})
+        for node in nodes :
+            for core in range(n_cores):
+                slot_name = "%s:%s" % (node, core)
+                slot_names.append (slot_name)
+                slot_infos  [slot_name] = list()
+                slot_started[slot_name] = sys.maxint
+
+        for unit_doc in docs['unit'] :
+            if unit_doc['pilot'] == pilot_doc['_id'] :
+
+                started  = None
+                finished = None
+                for event in sorted (unit_doc['statehistory'], 
+                                     key=lambda x: x['timestamp']) :
+                    if started :
+                        finished = event['timestamp']
+                        break
+                    if event['state'] == EXECUTING :
+                        started = event['timestamp']
+
+                if not started or not finished :
+                    print "no start/finish for cu %s - ignored" % unit_doc['_id']
+                    continue
+
+                for slot_id in unit_doc['slots'] :
+                    if slot_id not in slot_infos :
+                        print "slot %s for pilot %s unknown - ignored" % (slot_id, pilot_id)
+                        continue
+                    
+                    slot_infos[slot_id].append([started, finished])
+                    slot_started[slot_id] = min(started, slot_started[slot_id])
+
+        for slot_id in slot_infos :
+            slot_infos[slot_id].sort(key=lambda x: float(x[0]))
+
+        # we use the startup time to sort the slot names, as that gives a nicer
+        # representation when plotting.  That sorting should probably move to
+        # the plotting tools though... (FIXME)
+        slot_names.sort (key=lambda x: slot_started[x])
+
+        ret[pilot_id] = dict()
+        ret[pilot_id]['started']    = pilot_doc['started']
+        ret[pilot_id]['finished']   = pilot_doc['finished']
+        ret[pilot_id]['slots']      = slot_names
+        ret[pilot_id]['slot_infos'] = slot_infos
 
     return ret
 
 
 # ------------------------------------------------------------------------------
-def get_session_events (db, sid, cache=None) :
+def get_session_events (db, sid, cache=None, cachedir=None) :
     """
     For all entities in the session, create simple event tuples, and return
     them as a list
@@ -166,7 +343,7 @@ def get_session_events (db, sid, cache=None) :
       
     """
 
-    docs = get_session_docs (db, sid, cache)
+    docs = get_session_docs (db, sid, cache, cachedir)
 
     ret = list()
 
@@ -175,8 +352,8 @@ def get_session_events (db, sid, cache=None) :
         odoc  = dict()
         otype = 'session'
         oid   = str(doc['_id'])
-        ret.append (['state', otype, oid, None, doc['created'],        'created',        odoc])
-        ret.append (['state', otype, oid, None, doc['last_reconnect'], 'last_reconnect', odoc])
+        ret.append (['state', otype, oid, None, doc['created'],   'created',   odoc])
+        ret.append (['state', otype, oid, None, doc['connected'], 'connected', odoc])
 
     for doc in docs['pilot'] :
         odoc  = dict()

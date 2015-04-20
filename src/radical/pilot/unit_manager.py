@@ -19,7 +19,7 @@ from radical.pilot.compute_unit import ComputeUnit
 from radical.pilot.utils.logger import logger
 
 from radical.pilot.controller   import UnitManagerController
-from radical.pilot.scheduler    import get_scheduler
+from radical.pilot.scheduler    import get_scheduler, SCHED_DEFAULT
 
 from radical.pilot.types        import *
 from radical.pilot.states       import *
@@ -97,6 +97,9 @@ class UnitManager(object):
         self._session = session
         self._worker  = None 
         self._pilots  = list()
+
+        if not scheduler:
+            scheduler = SCHED_DEFAULT
 
         # keep track of some changing metrics
         self.wait_queue_size = 0
@@ -434,9 +437,9 @@ class UnitManager(object):
         units = list()
         for ud in unit_descriptions :
 
-            units.append (ComputeUnit._create (unit_description=ud,
-                                               unit_manager_obj=self, 
-                                               local_state=NEW))
+            units.append (ComputeUnit.create (unit_description=ud,
+                                              unit_manager_obj=self, 
+                                              local_state=SCHEDULING))
 
         self._worker.publish_compute_units (units=units)
 
@@ -509,7 +512,7 @@ class UnitManager(object):
                     logger.warn ("unschedule unit %s, lost pilot %s" % (unit.uid, pid))
                     continue
 
-                unit.sandbox = schedule['pilots'][pid]['sandbox'] + "/unit-" + str(unit.uid)
+                unit.sandbox = schedule['pilots'][pid]['sandbox'] + "/" + str(unit.uid)
 
                 ud = unit.description
 

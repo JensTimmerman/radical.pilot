@@ -66,7 +66,7 @@ class ComputePilot (object):
     # -------------------------------------------------------------------------
     #
     @staticmethod
-    def _create(pilot_manager_obj, pilot_description):
+    def create(pilot_manager_obj, pilot_description):
         """ PRIVATE: Create a new pilot.
         """
         # Create and return pilot object.
@@ -205,6 +205,24 @@ class ComputePilot (object):
     # -------------------------------------------------------------------------
     #
     @property
+    def callback_history(self):
+        """Returns the complete callback history of the pilot.
+        """
+        if not self._uid:
+            return None
+
+        callbacks = []
+
+        pilot_json = self._worker.get_compute_pilot_data(pilot_ids=self.uid)
+        if 'callbackhostory' in pilot_json :
+            for callback in pilot_json['callbackhistory']:
+                callbacks.append(State(state=callback["state"], timestamp=callback["timestamp"]))
+
+        return callbacks
+
+    # -------------------------------------------------------------------------
+    #
+    @property
     def stdout(self):
         """Returns the stdout of the pilot.
         """
@@ -254,7 +272,7 @@ class ComputePilot (object):
 
         pilot_json = self._worker.get_compute_pilot_data(pilot_ids=self.uid)
         for log in pilot_json['log']:
-            logs.append(Logentry(logentry=log["logentry"], timestamp=log["timestamp"]))
+            logs.append (Logentry.from_dict (log))
 
         return logs
 
@@ -292,7 +310,7 @@ class ComputePilot (object):
         if not self._uid:
             return None
 
-        raise NotImplemented("Not Implemented")
+        raise NotImplementedError("Not Implemented")
 
     # -------------------------------------------------------------------------
     #
@@ -304,7 +322,7 @@ class ComputePilot (object):
         if not self._uid:
             return None
 
-        raise NotImplemented("Not Implemented")
+        raise NotImplementedError("Not Implemented")
 
     # -------------------------------------------------------------------------
     #
@@ -373,8 +391,7 @@ class ComputePilot (object):
 
     # -------------------------------------------------------------------------
     #
-    def wait(self, state=[DONE, FAILED, CANCELED],
-             timeout=None):
+    def wait(self, state=None, timeout=None):
         """Returns when the pilot reaches a specific state or
         when an optional timeout is reached.
 
@@ -405,7 +422,10 @@ class ComputePilot (object):
         if not self._uid:
             raise IncorrectState("Invalid instance.")
 
-        if not isinstance(state, list):
+        if not state:
+            state = [DONE, FAILED, CANCELED]
+
+        elif not isinstance(state, list):
             state = [state]
 
         start_wait = time.time()
@@ -458,48 +478,67 @@ class ComputePilot (object):
         # Iterate over all directives
         for directive in expand_staging_directive(directives, logger):
 
-            source = directive['source']
+            # TODO: respect flags in directive
+
+            src_url = saga.Url(directive['source'])
             action = directive['action']
 
-            # TODO: verify target?
-            # Convert the target_url into a SAGA Url object
-            target_url = saga.Url(directive['target'])
+            # Convert the target url into a SAGA Url object
+            tgt_url = saga.Url(directive['target'])
+            # Create a pointer to the directory object that we will use
+            tgt_dir_url = tgt_url
+
+            if tgt_url.path.endswith('/'):
+                # If the original target was a directory (ends with /),
+                # we assume that the user wants the same filename as the source.
+                tgt_filename = os.path.basename(src_url.path)
+            else:
+                # Otherwise, extract the filename and update the directory
+                tgt_filename = os.path.basename(tgt_dir_url.path)
+                tgt_dir_url.path = os.path.dirname(tgt_dir_url.path)
 
             # Handle special 'staging' scheme
-            if target_url.scheme == 'staging':
-                logger.info('Operating from staging')
+            if tgt_dir_url.scheme == 'staging':
+
+                # We expect a staging:///relative/path/file.txt URI,
+                # as hostname would have unclear semantics currently.
+                if tgt_dir_url.host:
+                    raise Exception("hostname not supported with staging:// scheme")
 
                 # Remove the leading slash to get a relative path from the staging area
-                target = target_url.path.split('/',1)[1]
+                target = os.path.relpath(tgt_dir_url.path, '/')
 
-                remote_dir_url = saga.Url(os.path.join(self.sandbox, STAGING_AREA))
-            else:
-                remote_dir_url = target_url
-                remote_dir_url.path = os.path.dirname(directive['target'])
-                target = os.path.basename(directive['target'])
+                # Now base the target directory relative of the sandbox and staging prefix
+                tgt_dir_url = saga.Url(os.path.join(self.sandbox, STAGING_AREA, target))
 
             # Define and open the staging directory for the pilot
-            remote_dir = saga.filesystem.Directory(remote_dir_url,
-                                               flags=saga.filesystem.CREATE_PARENTS)
+            # We use the target dir construct here, so that we can create
+            # the directory if it does not yet exist.
+            target_dir = saga.filesystem.Directory(tgt_dir_url, flags=saga.filesystem.CREATE_PARENTS)
 
             if action == LINK:
                 # TODO: Does this make sense?
                 #log_message = 'Linking %s to %s' % (source, abs_target)
                 #os.symlink(source, abs_target)
-                pass
+                logger.error("action 'LINK' not supported on pilot level staging")
+                raise ValueError("action 'LINK' not supported on pilot level staging")
             elif action == COPY:
                 # TODO: Does this make sense?
                 #log_message = 'Copying %s to %s' % (source, abs_target)
                 #shutil.copyfile(source, abs_target)
-                pass
+                logger.error("action 'COPY' not supported on pilot level staging")
+                raise ValueError("action 'COPY' not supported on pilot level staging")
             elif action == MOVE:
                 # TODO: Does this make sense?
                 #log_message = 'Moving %s to %s' % (source, abs_target)
                 #shutil.move(source, abs_target)
-                pass
+                logger.error("action 'MOVE' not supported on pilot level staging")
+                raise ValueError("action 'MOVE' not supported on pilot level staging")
             elif action == TRANSFER:
-                log_message = 'Transferring %s to %s' % (source, remote_dir_url)
-                # Transfer the local file to the remote staging area
-                remote_dir.copy(source, target)
+                log_message = 'Transferring %s to %s' % (src_url, os.path.join(str(tgt_dir_url), tgt_filename))
+                logger.info(log_message)
+                # Transfer the source file to the target staging area
+                target_dir.copy(src_url, tgt_filename)
             else:
                 raise Exception('Action %s not supported' % action)
+

@@ -9,17 +9,14 @@ __license__ = "MIT"
 import os
 import time
 import saga
-import datetime
-import traceback
 import threading
 
-from bson.objectid import ObjectId
 from radical.pilot.states import * 
 from radical.pilot.utils.logger import logger
 from radical.pilot.staging_directives import CREATE_PARENTS
 
-# BULK_LIMIT defines the max. number of transfer requests to pull from DB.
-BULK_LIMIT=1
+BULK_LIMIT = 1    # max. number of transfer requests to pull from DB.
+IDLE_TIME  = 1.0  # seconds to sleep after idle cycles
 
 # ----------------------------------------------------------------------------
 #
@@ -58,10 +55,10 @@ class InputFileTransferWorker(threading.Thread):
     def stop(self):
         """stop() signals the process to finish up and terminate.
         """
-        logger.error("itransfer %s stopping" % (self.name))
+        logger.debug("itransfer %s stopping" % (self.name))
         self._stop.set()
         self.join()
-        logger.error("itransfer %s stopped" % (self.name))
+        logger.debug("itransfer %s stopped" % (self.name))
       # logger.debug("Worker thread (ID: %s[%s]) for UnitManager %s stopped." %
       #             (self.name, self.ident, self.unit_manager_id))
 
@@ -84,9 +81,9 @@ class InputFileTransferWorker(threading.Thread):
                 um_col = db["%s.cu" % self.db_connection_info.session_id]
                 logger.debug("Connected to MongoDB. Serving requests for UnitManager %s." % self.unit_manager_id)
 
-            except Exception, ex:
-                logger.error("Connection error: %s. %s" % (str(ex), traceback.format_exc()))
-                raise ex
+            except Exception as e :
+                logger.exception("Connection error: %s" % e)
+                raise
 
             try :
                 while not self._stop.is_set():
@@ -103,14 +100,15 @@ class InputFileTransferWorker(threading.Thread):
                                 "$push": {"statehistory": {"state": STAGING_INPUT, "timestamp": ts}}},
                         limit=BULK_LIMIT # TODO: bulklimit is probably not the best way to ensure there is just one
                     )
+                    # FIXME: AM: find_and_modify is not bulkable!
                     state = STAGING_INPUT
 
                     if compute_unit is None:
                         # Sleep a bit if no new units are available.
-                        time.sleep(0.1) # TODO: Probably need better sleep logic as we also have the logic on the end now
+                        time.sleep(IDLE_TIME) 
+
                     else:
-                        # AM: The code below seems wrong when BULK_LIMIT != 1 -- the
-                        # compute_unit will be a list then I assume.
+                        compute_unit_id = None
                         try:
                             log_messages = []
 
@@ -120,7 +118,7 @@ class InputFileTransferWorker(threading.Thread):
                             remote_sandbox = compute_unit["sandbox"]
                             input_staging = compute_unit["FTW_Input_Directives"]
 
-                            # We need to create the cU's directory in case it doesn't exist yet.
+                            # We need to create the CU's directory in case it doesn't exist yet.
                             log_msg = "Creating ComputeUnit sandbox directory %s." % remote_sandbox
                             log_messages.append(log_msg)
                             logger.info(log_msg)
@@ -142,16 +140,17 @@ class InputFileTransferWorker(threading.Thread):
                                 saga_dir = self._saga_dirs[remote_sandbox_key]
                                 saga_dir.make_dir (remote_sandbox, 
                                                    flags=saga.filesystem.CREATE_PARENTS)
-                            except Exception, ex:
-                                tb = traceback.format_exc()
-                                logger.info('Error: %s. %s' % (str(ex), tb))
+                            except Exception as e :
+                                logger.exception('Error: %s' % e)
+                                # FIXME: why is this exception ignored?  AM
+
 
                             logger.info("Processing input file transfers for ComputeUnit %s" % compute_unit_id)
                             # Loop over all transfer directives and execute them.
                             for sd in input_staging:
 
                                 state_doc = um_col.find_one(
-                                    {"_id": ObjectId(compute_unit_id)},
+                                    {"_id": compute_unit_id},
                                     fields=["state"]
                                 )
                                 if state_doc['state'] == CANCELED:
@@ -190,7 +189,7 @@ class InputFileTransferWorker(threading.Thread):
 
                                 # If all went fine, update the state of this StagingDirective to Done
                                 um_col.find_and_modify(
-                                    query={"_id" : ObjectId(compute_unit_id),
+                                    query={"_id" : compute_unit_id,
                                            'FTW_Input_Status': EXECUTING,
                                            'FTW_Input_Directives.state': PENDING,
                                            'FTW_Input_Directives.source': sd['source'],
@@ -199,25 +198,25 @@ class InputFileTransferWorker(threading.Thread):
                                     update={'$set': {'FTW_Input_Directives.$.state': 'Done'},
                                             '$push': {'log': {
                                                 'timestamp': datetime.datetime.utcnow(), 
-                                                'logentry': log_msg}}
+                                                'message'  : log_msg}}
                                     }
                                 )
 
-                        except Exception, ex:
+                        except Exception as e :
                             # Update the CU's state 'FAILED'.
                             ts = datetime.datetime.utcnow()
-                            msg = {'timestamp': ts, 'logentry': "Input transfer failed: %s\n%s" % (str(ex), traceback.format_exc())}
+                            logentry = {'message'  : "Input transfer failed: %s" % e,
+                                        'timestamp': ts}
 
-                            logger.exception(log_messages)
-                            um_col.update(
-                                {'_id':   ObjectId(compute_unit_id)},
-                                {'$set':  {'state': FAILED},
-                                 '$push': {'statehistory': {'state': FAILED, 'timestamp': ts}},
-                                 '$push': {'log': {
-                                    'timestamp': datetime.datetime.utcnow(), 
-                                    'logentry': log_msg}}
+                            um_col.update({'_id': compute_unit_id}, {
+                                '$set': {'state': FAILED},
+                                '$push': {
+                                    'statehistory': {'state': FAILED, 'timestamp': ts},
+                                    'log': logentry
                                 }
-                            )
+                            })
+
+                            logger.exception(str(logentry))
 
                     # Code below is only to be run by the "first" or only worker
                     if self._worker_number > 1:
@@ -242,11 +241,11 @@ class InputFileTransferWorker(threading.Thread):
                         if cu['FTW_Input_Status'] == EXECUTING and \
                                 not any(d['state'] == EXECUTING or d['state'] == PENDING for d in cu['FTW_Input_Directives']):
                             # All Input Directives for this FTW are done, mark the CU accordingly
-                            um_col.update({"_id": ObjectId(cu["_id"])},
+                            um_col.update({"_id": cu["_id"]},
                                           {'$set': {'FTW_Input_Status': DONE},
-                                           '$push': {'log': { 
-                                                'timestamp': datetime.datetime.utcnow(), 
-                                                'logentry': 'All FTW Input Staging Directives done - %d.' % self._worker_number}}
+                                           '$push': {'log': {
+                                                'timestamp': datetime.datetime.utcnow(),
+                                                'message'  : 'All FTW Input Staging Directives done - %d.' % self._worker_number}}
                                            }
                             )
 
@@ -255,11 +254,11 @@ class InputFileTransferWorker(threading.Thread):
                         if cu['Agent_Input_Status'] == EXECUTING and \
                                 not any(d['state'] == EXECUTING or d['state'] == PENDING for d in cu['Agent_Input_Directives']):
                             # All Input Directives for this Agent are done, mark the CU accordingly
-                            um_col.update({"_id": ObjectId(cu["_id"])},
+                            um_col.update({"_id": cu["_id"]},
                                            {'$set': {'Agent_Input_Status': DONE},
                                             '$push': {'log': {
                                                 'timestamp': datetime.datetime.utcnow(), 
-                                                'logentry': 'All Agent Input Staging Directives done - %d.' % self._worker_number}}
+                                                'message'  : 'All Agent Input Staging Directives done - %d.' % self._worker_number}}
                                            }
                             )
 
@@ -284,14 +283,11 @@ class InputFileTransferWorker(threading.Thread):
 
             except Exception as e :
 
-                logger.error("transfer worker error: %s\n %s" % (str(e), traceback.format_exc()))
+                logger.exception("transfer worker error: %s" % e)
                 self._session.close (cleanup=False)
-                raise e
+                raise
 
         except SystemExit as e :
-            logger.error("input file transfer thread caught system exit -- forcing application shutdown")
+            logger.debug("input file transfer thread caught system exit -- forcing application shutdown")
             import thread
             thread.interrupt_main ()
-            
-
-

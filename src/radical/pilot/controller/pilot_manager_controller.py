@@ -18,7 +18,7 @@ import threading
 import weakref
 from multiprocessing import Pool
 
-from radical.utils import which
+import radical.utils as ru
 
 from radical.pilot.states       import *
 from radical.pilot.utils.logger import logger
@@ -26,6 +26,9 @@ from radical.pilot.utils.logger import logger
 from radical.pilot.controller.pilot_launcher_worker import PilotLauncherWorker
 
 from radical.pilot.db.database import COMMAND_CANCEL_PILOT
+
+IDLE_TIME  = 1.0  # seconds to sleep after idle cycles
+
 
 # ----------------------------------------------------------------------------
 #
@@ -170,10 +173,9 @@ class PilotManagerController(threading.Thread):
             else :
                 return data[0]
 
-        except KeyError, ke:
-            msg = "Unknown Pilot ID %s" % ke
-            logger.error(msg)
-            raise Exception(msg)
+        except KeyError as e:
+            logger.exception ("Unknown Pilot ID %s : %s" % (pilot_id, e))
+            raise
 
     # ------------------------------------------------------------------------
     #
@@ -181,10 +183,10 @@ class PilotManagerController(threading.Thread):
         """cancel the launcher threads
         """
         for worker in self._pilot_launcher_worker_pool:
-            logger.error("pworker %s stops   launcher %s" % (self.name, worker.name))
+            logger.debug("pworker %s stops   launcher %s" % (self.name, worker.name))
             worker.stop ()
             worker.join ()
-            logger.error("pworker %s stopped launcher %s" % (self.name, worker.name))
+            logger.debug("pworker %s stopped launcher %s" % (self.name, worker.name))
 
 
     # ------------------------------------------------------------------------
@@ -192,10 +194,10 @@ class PilotManagerController(threading.Thread):
     def stop(self):
         """stop() signals the process to finish up and terminate.
         """
-        logger.error("pworker %s stopping" % (self.name))
+        logger.debug("pworker %s stopping" % (self.name))
         self._stop.set()
         self.join()
-        logger.error("pworker %s stopped" % (self.name))
+        logger.debug("pworker %s stopped" % (self.name))
 
       # logger.debug("Worker thread (ID: %s[%s]) for PilotManager %s stopped." %
       #             (self.name, self.ident, self._pm_id))
@@ -224,8 +226,8 @@ class PilotManagerController(threading.Thread):
                         cb (self._shared_data[pilot_id]['facade_object'](), new_state)
                 else :
                     logger.error("Couldn't call callback (no pilot instance)")
-            except Exception, ex:
-                logger.error("Couldn't call callback function %s" % str(ex))
+            except Exception as e:
+                logger.exception("Couldn't call callback function %s" % e)
                 raise
 
         # If we have any manager-level callbacks registered, we
@@ -239,9 +241,9 @@ class PilotManagerController(threading.Thread):
                         cb(self._shared_data[pilot_id]['facade_object'](), new_state)
                 else :
                     logger.error("Couldn't call manager callback (no pilot instance)")
-            except Exception, ex:
-                logger.error(
-                    "Couldn't call callback function %s" % str(ex))
+            except Exception as e:
+                logger.exception(
+                    "Couldn't call callback function %s" % e)
                 raise
 
         # if we meet a final state, we record the object's callback history for
@@ -279,7 +281,8 @@ class PilotManagerController(threading.Thread):
                 #             pilot_uid=result["pilot_uid"],
                 #             state=result["state"],
                 #             sagajobid=result["saga_job_id"],
-                #             sandbox=result["sandbox"],
+                #             pilot_sandbox=result["sandbox"],
+                #             global_sandbox=result["global_sandbox"],
                 #             submitted=result["submitted"],
                 #             logs=result["logs"]
                 #         )
@@ -295,6 +298,7 @@ class PilotManagerController(threading.Thread):
                 # some point, i.e., state pulling should be conditional
                 # or triggered by a tailable MongoDB cursor, etc.
                 pilot_list = self._db.get_pilots(pilot_manager_id=self._pm_id)
+                action = False
 
                 for pilot in pilot_list:
                     pilot_id = str(pilot["_id"])
@@ -327,15 +331,19 @@ class PilotManagerController(threading.Thread):
                             # do not tr igger a state cb!
                             no_cb = True
 
-                    if (new_state != old_state) and not no_cb :
-                        # On a state change, we fire zee callbacks.
-                        logger.info("ComputePilot '%s' state changed from '%s' to '%s'." % (pilot_id, old_state, new_state))
+                    if new_state != old_state :
+                        action = True
 
-                        # The state of the pilot has changed, We call all
-                        # pilot-level callbacks to propagate this.  This also
-                        # includes communication to the unit scheduler which
-                        # may, or may not, cancel the pilot's units.
-                        self.call_callbacks(pilot_id, new_state)
+                        if not no_cb :
+                            # On a state change, we fire zee callbacks.
+                            logger.info("ComputePilot '%s' state changed from '%s' to '%s'." \
+                                            % (pilot_id, old_state, new_state))
+
+                            # The state of the pilot has changed, We call all
+                            # pilot-level callbacks to propagate this.  This also
+                            # includes communication to the unit scheduler which
+                            # may, or may not, cancel the pilot's units.
+                            self.call_callbacks(pilot_id, new_state)
 
                     # If the state is 'DONE', 'FAILED' or 'CANCELED', we also
                     # set the state of the compute unit accordingly (but only
@@ -360,8 +368,8 @@ class PilotManagerController(threading.Thread):
                     self._initialized.set()
 
                 # sleep a little if this cycle was idle
-                if  not len(pilot_list) :
-                    time.sleep(1)
+                if  not action :
+                    time.sleep(IDLE_TIME)
 
         except SystemExit as e :
             logger.exception ("pilot manager controller thread caught system exit -- forcing application shutdown")
@@ -371,11 +379,11 @@ class PilotManagerController(threading.Thread):
         finally :
             # shut down the autonomous pilot launcher worker(s)
             for worker in self._pilot_launcher_worker_pool:
-                logger.error("pworker %s stops   launcher %s" % (self.name, worker.name))
+                logger.debug("pworker %s stops   launcher %s" % (self.name, worker.name))
                 worker.stop ()
-                logger.error("pworker %s stopped launcher %s" % (self.name, worker.name))
+                logger.debug("pworker %s stopped launcher %s" % (self.name, worker.name))
 
-            
+
 
     # ------------------------------------------------------------------------
     #
@@ -384,7 +392,7 @@ class PilotManagerController(threading.Thread):
         """
 
         # create a new UID for the pilot
-        pilot_uid = bson.ObjectId()
+        pilot_uid = ru.generate_id ('pilot')
 
         # switch endpoint type
         filesystem_endpoint = resource_config['filesystem_endpoint']
@@ -403,37 +411,39 @@ class PilotManagerController(threading.Thread):
             url = "%s://%s/" % (fs.schema, fs.host)
 
         logger.debug ("saga.utils.PTYShell ('%s')" % url)
-        shell = sup.PTYShell (url, self._session, logger, opts={})
+        shell = sup.PTYShell(url, self._session, logger)
 
-        if pilot.description.sandbox is not None:
+        if pilot.description.sandbox :
             workdir_raw = pilot.description.sandbox
-        elif 'default_remote_workdir' in resource_config and \
-            resource_config['default_remote_workdir'] is not None:
-            workdir_raw = resource_config['default_remote_workdir']
-        else:
-            workdir_raw = "$PWD"
-
-        ret, out, err = shell.run_sync (' echo "WORKDIR: %s"' % workdir_raw)
-        if  ret == 0 and 'WORKDIR:' in out :
-            workdir_expanded = out.split(":")[1].strip()
-            logger.debug("Determined remote working directory for %s: '%s'" % (url, workdir_expanded))
         else :
-            error_msg = "Couldn't determine remote working directory."
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            workdir_raw = resource_config.get ('default_remote_workdir', "$PWD")
+
+        if '$' in workdir_raw or '`' in workdir_raw :
+            ret, out, err = shell.run_sync (' echo "WORKDIR: %s"' % workdir_raw)
+            if  ret == 0 and 'WORKDIR:' in out :
+                workdir_expanded = out.split(":")[1].strip()
+                logger.debug("Determined remote working directory for %s: '%s'" % (url, workdir_expanded))
+            else :
+                error_msg = "Couldn't determine remote working directory."
+                logger.error(error_msg)
+                raise Exception(error_msg)
+        else :
+            workdir_expanded = workdir_raw
 
         # At this point we have determined 'pwd'
         fs.path = "%s/radical.pilot.sandbox" % workdir_expanded
 
         # This is the base URL / 'sandbox' for the pilot!
-        agent_dir_url = saga.Url("%s/pilot-%s/" % (str(fs), str(pilot_uid)))
+        agent_dir_url = saga.Url("%s/%s-%s/" % (str(fs), self._session.uid, pilot_uid))
 
         # Create a database entry for the new pilot.
         pilot_uid, pilot_json = self._db.insert_pilot(
             pilot_uid=pilot_uid,
             pilot_manager_uid=self._pm_id,
             pilot_description=pilot.description,
-            sandbox=str(agent_dir_url))
+            pilot_sandbox=str(agent_dir_url), 
+            global_sandbox=str(fs.path)
+            )
 
         # Create a shared data store entry
         self._shared_data[pilot_uid] = {
@@ -508,7 +518,7 @@ class PilotManagerController(threading.Thread):
 
                 elif old_state in [PENDING_LAUNCH, LAUNCHING, PENDING_ACTIVE] :
                     if pilot_id in self._shared_worker_data['job_ids'] :
-                        
+
                         try :
                             job_id, js_url = self._shared_worker_data['job_ids'][pilot_id]
                             self._shared_data[pilot_id]["data"]["state"] = CANCELING
@@ -526,11 +536,11 @@ class PilotManagerController(threading.Thread):
                         logger.debug (pprint.pformat (self._shared_worker_data))
 
                 else :
-                    logger.error ("delay to actively cancel pilot %s: state %s" % (pilot_id, old_state))
+                    logger.debug ("delay to actively cancel pilot %s: state %s" % (pilot_id, old_state))
                     delayed_cancel.append (pilot_id)
 
             else :
-                logger.error ("can't actively cancel pilot %s: unknown pilot" % pilot_id)
+                logger.warn  ("can't actively cancel pilot %s: unknown pilot" % pilot_id)
                 logger.debug (pprint.pformat (self._shared_data))
 
         # now tend to all delayed cancellation requests (ie. active pilots) --
@@ -552,7 +562,7 @@ class PilotManagerController(threading.Thread):
                         job = js.get_job (job_id)
                         job.cancel ()
                     except Exception as e :
-                        logger.exception ('delayed pilot cancelation failed. '
+                        logger.warn ('delayed pilot cancelation failed. '
                                 'This is not necessarily a problem.')
 
                 else :

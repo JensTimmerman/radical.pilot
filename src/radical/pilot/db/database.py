@@ -18,7 +18,6 @@ import gridfs
 import radical.utils as ru
 
 from pymongo import *
-from bson.objectid import ObjectId
 
 from radical.pilot.states import *
 from radical.pilot.utils  import DBConnectionInfo
@@ -79,7 +78,10 @@ class Session():
         self._db     = db
         self._dburl  = str(url)
         self._dbname = dbname
-        self._dbauth = "%s:%s" % (url.username, url.password)
+        if url.username and url.password:
+            self._dbauth = "%s:%s" % (url.username, url.password)
+        else:
+            self._dbauth = None
 
         self._session_id = None
 
@@ -94,13 +96,13 @@ class Session():
     #--------------------------------------------------------------------------
     #
     @staticmethod
-    def new(sid, db_url, db_name="radicalpilot"):
+    def new(sid, name, db_url, db_name="radicalpilot"):
         """ Creates a new session (factory method).
         """
         creation_time = datetime.datetime.utcnow()
 
         dbs = Session(db_url, db_name)
-        dbs._create(sid, creation_time)
+        dbs.create(sid, name, creation_time)
 
         connection_info = DBConnectionInfo(
             session_id=sid,
@@ -113,7 +115,7 @@ class Session():
 
     #--------------------------------------------------------------------------
     #
-    def _create(self, sid, creation_time):
+    def create(self, sid, name, creation_time):
         """ Creates a new session (private).
 
             A session is a distinct collection with three sub-collections
@@ -139,13 +141,10 @@ class Session():
         self._session_id = sid
 
         self._s = self._db["%s" % sid]
-        self._s.insert( 
-            {
-                "_id"  : ObjectId(sid),
-                "created"          : creation_time,
-                "last_reconnect"   : None
-            }
-        )
+        self._s.insert({"_id"       : sid,
+                        "name"      : name,
+                        "created"   : creation_time,
+                        "connected" : creation_time})
 
         # Create the collection shortcut:
         self._w  = self._db["%s.cu" % sid]
@@ -184,13 +183,13 @@ class Session():
         #    raise DBEntryDoesntExistException("Session with id '%s' doesn't exists." % sid)
 
         self._s = self._db["%s" % sid]
-        cursor = self._s.find({"_id": ObjectId(sid)})
+        cursor = self._s.find({"_id": sid})
 
-        self._s.update({"_id"  : ObjectId(sid)},
-                       {"$set" : {"last_reconnect" : datetime.datetime.utcnow()}}
+        self._s.update({"_id"  : sid},
+                       {"$set" : {"connected" : datetime.datetime.utcnow()}}
         )
 
-        cursor = self._s.find({"_id": ObjectId(sid)})
+        cursor = self._s.find({"_id": sid})
 
         # cursor -> dict
         #if len(cursor) != 1:
@@ -271,7 +270,7 @@ class Session():
         if self._s is None:
             raise Exception("No active session.")
 
-        cursor = self._w.find({"_id": ObjectId(unit_uid)})
+        cursor = self._w.find({"_id": unit_uid})
 
         return cursor[0]['stdout']
 
@@ -283,7 +282,7 @@ class Session():
         if self._s is None:
             raise Exception("No active session.")
 
-        cursor = self._w.find({"_id": ObjectId(unit_uid)})
+        cursor = self._w.find({"_id": unit_uid})
 
         return cursor[0]['stderr']
 
@@ -291,7 +290,8 @@ class Session():
     #
     def update_pilot_state(self, pilot_uid, started=None, finished=None,
                            submitted=None, state=None, sagajobid=None,
-                           sandbox=None, logs=None):
+                           pilot_sandbox=None, global_sandbox=None, 
+                           logs=None):
 
         """Updates the information of a pilot.
         """
@@ -299,34 +299,26 @@ class Session():
             raise Exception("No active session.")
 
         # construct the update query
-        set_query = dict()
+        set_query  = dict()
         push_query = dict()
 
-        if state is not None:
+        if state :
             set_query["state"] = state
             push_query["statehistory"] = [{'state': state, 'timestamp': datetime.datetime.utcnow()}]
 
-        if started is not None:
-            set_query["started"] = started
-
-        if finished is not None:
-            set_query["finished"] = finished
-
-        if submitted is not None:
-            set_query["submitted"] = submitted
-
-        if sagajobid is not None:
-            set_query["sagajobid"] = sagajobid
-
-        if sandbox is not None:
-            set_query["sandbox"] = sandbox
-
-        if logs is not None:
+        if logs  : 
             push_query["log"] = logs
+
+        if started        : set_query["started"]        = started 
+        if finished       : set_query["finished"]       = finished 
+        if submitted      : set_query["submitted"]      = submitted 
+        if sagajobid      : set_query["sagajobid"]      = sagajobid 
+        if pilot_sandbox  : set_query["sandbox"]        = pilot_sandbox 
+        if global_sandbox : set_query["global_sandbox"] = global_sandbox 
 
         # update pilot entry.
         self._p.update(
-            {"_id": ObjectId(pilot_uid)},
+            {"_id": pilot_uid},
             {"$set": set_query, "$pushAll": push_query},
             multi=True
         )
@@ -334,7 +326,7 @@ class Session():
     #--------------------------------------------------------------------------
     #
     def insert_pilot(self, pilot_uid, pilot_manager_uid, pilot_description,
-        sandbox):
+        pilot_sandbox, global_sandbox):
         """Adds a new pilot document to the database.
         """
         if self._s is None:
@@ -356,7 +348,8 @@ class Session():
             "nodes":          None,
             "cores_per_node": None,
             "sagajobid":      None,
-            "sandbox":        sandbox,
+            "sandbox":        pilot_sandbox,
+            "global_sandbox": global_sandbox,
             "state":          PENDING_LAUNCH,
             "statehistory":   [{"state": PENDING_LAUNCH, "timestamp": ts}],
             "log":            [],
@@ -365,7 +358,7 @@ class Session():
             "commands":       []
         }
 
-        self._p.insert(pilot_doc, upsert=False)
+        self._p.insert(pilot_doc)
 
         return str(pilot_uid), pilot_doc
 
@@ -411,7 +404,7 @@ class Session():
             # convert ids to object ids
             pilot_oid = []
             for pid in pilot_ids:
-                pilot_oid.append(ObjectId(pid))
+                pilot_oid.append(pid)
             cursor = self._p.find({"_id": {"$in": pilot_oid}})
 
         pilots_json = []
@@ -454,7 +447,7 @@ class Session():
             # specified convert ids to object ids
             for pid in pilot_ids:
                 self._p.update(
-                    {"_id": ObjectId(pid)},
+                    {"_id": pid},
                     {"$push": command}
                 )
 
@@ -466,7 +459,7 @@ class Session():
         if self._s is None:
             raise Exception("No active session.")
 
-        self._p.update({"_id": ObjectId(pilot_uid)},
+        self._p.update({"_id": pilot_uid},
                        {"$set": {"callbackhistory": callback_history}})
 
     #--------------------------------------------------------------------------
@@ -486,7 +479,7 @@ class Session():
             # convert ids to object ids
             unit_oid = []
             for wid in unit_ids:
-                unit_oid.append(ObjectId(wid))
+                unit_oid.append(wid)
 
             cursor = self._w.find(
                 {"_id": {"$in": unit_oid},
@@ -514,7 +507,7 @@ class Session():
                        document = {"$set" : set_dict, 
                                    "$push": push_dict}, 
                        multi    = True)
-        
+
 
     #--------------------------------------------------------------------------
     #
@@ -544,16 +537,16 @@ class Session():
         for uid in unit_ids :
 
             if src_states :
-                bulk.find   ({"_id"     : ObjectId(uid), 
+                bulk.find   ({"_id"     : uid, 
                               "state"   : {"$in"  : src_states} }) \
                     .update ({"$set"    : {"state": state},
                               "$push"   : {"statehistory": {"state": state, "timestamp": ts}},
-                              "$push"   : {"log"  : {"logentry": log, "timestamp": ts}}})
+                              "$push"   : {"log"  : {"message": log, "timestamp": ts}}})
             else :
-                bulk.find   ({"_id"     : ObjectId(uid)}) \
+                bulk.find   ({"_id"     : uid}) \
                     .update ({"$set"    : {"state": state},
                               "$push"   : {"statehistory": {"state": state, "timestamp": ts}},
-                              "$push"   : {"log"  : {"logentry": log, "timestamp": ts}}})
+                              "$push"   : {"log"  : {"message": log, "timestamp": ts}}})
 
         result = bulk.execute()
 
@@ -579,7 +572,7 @@ class Session():
             # convert ids to object ids
             unit_oid = []
             for wid in unit_ids:
-                unit_oid.append(ObjectId(wid))
+                unit_oid.append(wid)
 
             cursor = self._w.find(
                 {"_id": {"$in": unit_oid},
@@ -620,7 +613,7 @@ class Session():
         if self._s is None:
             raise DBException("No active session.")
 
-        cursor = self._um.find({"_id": ObjectId(unit_manager_id)})
+        cursor = self._um.find({"_id": unit_manager_id})
 
         if cursor.count() != 1:
             msg = "No unit manager with id %s found in DB." % unit_manager_id
@@ -640,7 +633,7 @@ class Session():
         if self._s is None:
             raise DBException("No active session.")
 
-        cursor = self._pm.find({"_id": ObjectId(pilot_manager_id)})
+        cursor = self._pm.find({"_id": pilot_manager_id})
 
         try:
             return cursor[0]
@@ -674,7 +667,7 @@ class Session():
             raise Exception("No active session.")
 
         for pilot_id in pilot_ids:
-            self._p.update({"_id": ObjectId(pilot_id)},
+            self._p.update({"_id": pilot_id},
                            {"$set": {"unitmanager": unit_manager_id}},
                            True)
 
@@ -688,7 +681,7 @@ class Session():
 
         # Add the ids to the pilot's queue
         for pilot_id in pilot_ids:
-            self._p.update({"_id": ObjectId(pilot_id)},
+            self._p.update({"_id": pilot_id},
                            {"$set": {"unitmanager": None}}, True)
 
     #--------------------------------------------------------------------------
@@ -765,7 +758,7 @@ class Session():
 
         for unit in units :
 
-            bulk.find   ({"_id" : ObjectId(unit.uid)}) \
+            bulk.find   ({"_id" : unit.uid}) \
                 .update ({"$set": {"description"   : unit.description.as_dict(),
                                    "pilot"         : pilot_uid,
                                    "pilot_sandbox" : pilot_sandbox,
@@ -792,7 +785,7 @@ class Session():
         if self._s is None:
             raise Exception("No active session.")
 
-        self._w.update({"_id": ObjectId(unit_uid)},
+        self._w.update({"_id": unit_uid},
                        {"$set": {"callbackhistory": callback_history}})
 
     #--------------------------------------------------------------------------
@@ -816,7 +809,7 @@ class Session():
             ts = datetime.datetime.utcnow()
 
             unit_json = {
-                "_id":           ObjectId(unit.uid),
+                "_id":           unit.uid,
                 "description":   unit.description.as_dict(),
                 "restartable":   unit.description.restartable,
                 "unitmanager":   unit_manager_uid,
@@ -829,7 +822,6 @@ class Session():
                 "finished":      None,
                 "exec_locs":     None,
                 "exit_code":     None,
-                #"workdir":       "unit-"+unit.uid,
                 "sandbox":       None,
                 "stdout":        None,
                 "stderr":        None,

@@ -26,6 +26,8 @@ from radical.pilot.controller.output_file_transfer_worker import OutputFileTrans
 
 from radical.pilot.staging_directives import TRANSFER, LINK, COPY, MOVE
 
+IDLE_TIME = 1.0  # seconds to sleep between activities
+
 # ----------------------------------------------------------------------------
 #
 class UnitManagerController(threading.Thread):
@@ -141,10 +143,10 @@ class UnitManagerController(threading.Thread):
     def stop(self):
         """stop() signals the process to finish up and terminate.
         """
-        logger.error("uworker  %s stopping" % (self.name))
+        logger.debug("uworker  %s stopping" % (self.name))
         self._stop.set()
         self.join()
-        logger.error("uworker  %s stopped" % (self.name))
+        logger.debug("uworker  %s stopped" % (self.name))
       # logger.debug("Worker thread (ID: %s[%s]) for UnitManager %s stopped." %
       #             (self.name, self.ident, self._um_id))
 
@@ -173,7 +175,7 @@ class UnitManagerController(threading.Thread):
         self._callback_histories[unit_id].append (
                 {'timestamp' : datetime.datetime.utcnow(), 
                  'state'     : new_state})
-    
+
         for [cb, cb_data] in self._shared_data[unit_id]['callbacks']:
             try:
 
@@ -184,9 +186,9 @@ class UnitManagerController(threading.Thread):
                         cb(self._shared_data[unit_id]['facade_object'], new_state)
                 else :
                     logger.error("Couldn't call callback (no pilot instance)")
-            except Exception, ex:
-                logger.error(
-                    "Couldn't call callback function %s" % str(ex))
+            except Exception as e:
+                logger.exception(
+                    "Couldn't call callback function %s" % e)
                 raise
 
         # If we have any manager-level callbacks registered, we
@@ -195,14 +197,18 @@ class UnitManagerController(threading.Thread):
             self._manager_callbacks[UNIT_STATE] = list()
 
         for [cb, cb_data] in self._manager_callbacks[UNIT_STATE]:
+            if not self._shared_data[unit_id]['facade_object'] :
+                logger.warning ('skip cb for incomple unit (%s: %s)' % (unit_id, new_state))
+                break
+
             try:
                 if  cb_data :
                     cb(self._shared_data[unit_id]['facade_object'], new_state, cb_data)
                 else :
                     cb(self._shared_data[unit_id]['facade_object'], new_state)
-            except Exception, ex:
-                logger.error(
-                    "Couldn't call callback function %s" % str(ex))
+            except Exception as e:
+                logger.exception(
+                    "Couldn't call callback function %s" % e)
                 raise
 
         # If we meet a final state, we record the object's callback history for
@@ -271,7 +277,7 @@ class UnitManagerController(threading.Thread):
                 # some point, i.e., state pulling should be conditional
                 # or triggered by a tailable MongoDB cursor, etc.
                 unit_list = self._db.get_compute_units(unit_manager_id=self._um_id)
-
+                action    = False
 
                 for unit in unit_list:
                     unit_id = str(unit["_id"])
@@ -301,13 +307,15 @@ class UnitManagerController(threading.Thread):
                         # unit-level callbacks to propagate this.
                         self.call_unit_state_callbacks(unit_id, new_state)
 
+                        action = True
+
                 # After the first iteration, we are officially initialized!
                 if not self._initialized.is_set():
                     self._initialized.set()
 
                 # sleep a little if this cycle was idle
-                if  not len(unit_list) :
-                    time.sleep(0.1)
+                if  not action :
+                    time.sleep(IDLE_TIME)
 
 
         except SystemExit as e :
@@ -319,15 +327,15 @@ class UnitManagerController(threading.Thread):
         finally :
             # shut down the autonomous input / output transfer worker(s)
             for worker in self._input_file_transfer_worker_pool:
-                logger.error("uworker %s stops   itransfer %s" % (self.name, worker.name))
+                logger.debug("uworker %s stops   itransfer %s" % (self.name, worker.name))
                 worker.stop ()
-                logger.error("uworker %s stopped itransfer %s" % (self.name, worker.name))
+                logger.debug("uworker %s stopped itransfer %s" % (self.name, worker.name))
 
             for worker in self._output_file_transfer_worker_pool:
-                logger.error("uworker %s stops   otransfer %s" % (self.name, worker.name))
+                logger.debug("uworker %s stops   otransfer %s" % (self.name, worker.name))
                 worker.stop ()
-                logger.error("uworker %s stopped otransfer %s" % (self.name, worker.name))
-            
+                logger.debug("uworker %s stopped otransfer %s" % (self.name, worker.name))
+
 
     # ------------------------------------------------------------------------
     #
@@ -379,9 +387,9 @@ class UnitManagerController(threading.Thread):
                     cb (obj, value, cb_data)
                 else :
                     cb (obj, value)
-            except Exception, ex:
-                logger.error ("Couldn't call '%s' callback function %s: %s" \
-                           % (metric, cb, ex))
+            except Exception as e:
+                logger.exception ("Couldn't call '%s' callback function %s: %s" \
+                           % (metric, cb, e))
                 raise
 
     # ------------------------------------------------------------------------
@@ -515,8 +523,8 @@ class UnitManagerController(threading.Thread):
                         input_sds = [input_sds]
                     else:
                         input_sds = []
-                for input_sd_entry in input_sds:
 
+                for input_sd_entry in input_sds:
                     action = input_sd_entry['action']
                     source = Url(input_sd_entry['source'])
                     target = Url(input_sd_entry['target'])
@@ -529,10 +537,10 @@ class UnitManagerController(threading.Thread):
                               'state':    PENDING
                     }
 
-                    if action == LINK or action == COPY or action == MOVE:
+                    if action in [LINK, COPY, MOVE]:
                         unit.Agent_Input_Directives.append(new_sd)
                         unit.Agent_Input_Status = PENDING
-                    elif action == TRANSFER:
+                    elif action in [TRANSFER]:
                         if source.scheme and source.scheme != 'file':
                             # If there is a scheme and it is different than "file",
                             # assume a remote pull from the agent
@@ -543,7 +551,7 @@ class UnitManagerController(threading.Thread):
                             unit.FTW_Input_Directives.append(new_sd)
                             unit.FTW_Input_Status = PENDING
                     else:
-                        logger.error('Not sure if action %s makes sense for input staging' % action)
+                        logger.warn('Not sure if action %s makes sense for input staging' % action)
 
                 # Split the output staging directives over the transfer worker and the agent
                 output_sds = unit.description.output_staging
@@ -554,8 +562,8 @@ class UnitManagerController(threading.Thread):
                         output_sds = [output_sds]
                     else:
                         output_sds = []
-                for output_sds_entry in output_sds:
 
+                for output_sds_entry in output_sds:
                     action = output_sds_entry['action']
                     source = Url(output_sds_entry['source'])
                     target = Url(output_sds_entry['target'])
@@ -582,7 +590,7 @@ class UnitManagerController(threading.Thread):
                             unit.FTW_Output_Directives.append(new_sd)
                             unit.FTW_Output_Status = NEW
                     else:
-                        logger.error('Not sure if action %s makes sense for output staging' % action)
+                        logger.warn('Not sure if action %s makes sense for output staging' % action)
 
                 if unit.FTW_Input_Directives or unit.Agent_Input_Directives:
                     log = "Scheduled for data transfer to ComputePilot %s." % pilot_uid

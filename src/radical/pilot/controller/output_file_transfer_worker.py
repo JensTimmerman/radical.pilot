@@ -13,13 +13,12 @@ import datetime
 import traceback
 import threading
 
-from bson.objectid import ObjectId
 from radical.pilot.states import * 
 from radical.pilot.utils.logger import logger
 from radical.pilot.staging_directives import CREATE_PARENTS
 
-# BULK_LIMIT defines the max. number of transfer requests to pull from DB.
-BULK_LIMIT=1
+BULK_LIMIT = 1    # max. number of transfer requests to pull from DB.
+IDLE_TIME  = 1.0  # seconds to sleep after idle cycles
 
 # ----------------------------------------------------------------------------
 #
@@ -54,10 +53,10 @@ class OutputFileTransferWorker(threading.Thread):
     def stop(self):
         """stop() signals the process to finish up and terminate.
         """
-        logger.error("otransfer %s stopping" % (self.name))
+        logger.debug("otransfer %s stopping" % (self.name))
         self._stop.set()
         self.join()
-        logger.error("otransfer %s stopped" % (self.name))
+        logger.debug("otransfer %s stopped" % (self.name))
       # logger.debug("Worker thread (ID: %s[%s]) for UnitManager %s stopped." %
       #             (self.name, self.ident, self.unit_manager_id))
 
@@ -77,8 +76,8 @@ class OutputFileTransferWorker(threading.Thread):
                 um_col = db["%s.cu" % self.db_connection_info.session_id]
                 logger.debug("Connected to MongoDB. Serving requests for UnitManager %s." % self.unit_manager_id)
 
-            except Exception, ex:
-                logger.error("Connection error: %s. %s" % (str(ex), traceback.format_exc()))
+            except Exception as e:
+                logger.exception("Connection error: %s" % e)
                 return
 
             while not self._stop.is_set():
@@ -95,24 +94,23 @@ class OutputFileTransferWorker(threading.Thread):
                             "$push": {"statehistory": {"state": STAGING_OUTPUT, "timestamp": ts}}},
                     limit=BULK_LIMIT
                 )
+                # FIXME: AM: find_and_modify is not bulkable!
                 state = STAGING_OUTPUT
 
                 #logger.info("OFTW after finding pending cus")
                 if compute_unit is None:
                     #logger.info("OFTW no cus, sleep")
                     # Sleep a bit if no new units are available.
-                    time.sleep(0.1)
+                    time.sleep(IDLE_TIME)
                 else:
                     logger.info("OFTW cu found, progressing ...")
-                    # AM: The code below seems wrong when BULK_LIMIT != 1 -- the
-                    # compute_unit will be a list then I assume.
+                    compute_unit_id = None
                     try:
                         # We have found a new CU. Now we can process the transfer
                         # directive(s) wit SAGA.
                         compute_unit_id = str(compute_unit["_id"])
                         remote_sandbox = compute_unit["sandbox"]
-                        staging_directives = compute_unit["description"]["output_staging"]
-
+                        staging_directives = compute_unit["FTW_Output_Directives"]
 
                         logger.info("Processing output file transfers for ComputeUnit %s" % compute_unit_id)
                         # Loop over all staging directives and execute them.
@@ -120,7 +118,7 @@ class OutputFileTransferWorker(threading.Thread):
 
                             # Check if there was a cancel request
                             state_doc = um_col.find_one(
-                                {"_id": ObjectId(compute_unit_id)},
+                                {"_id": compute_unit_id},
                                 fields=["state"]
                             )
                             if state_doc['state'] == CANCELED:
@@ -135,7 +133,7 @@ class OutputFileTransferWorker(threading.Thread):
 
                             # Mark the beginning of transfer this StagingDirective
                             um_col.find_and_modify(
-                                query={"_id" : ObjectId(compute_unit_id),
+                                query={"_id" : compute_unit_id,
                                        'FTW_Output_Status': EXECUTING,
                                        'FTW_Output_Directives.state': PENDING,
                                        'FTW_Output_Directives.source': sd['source'],
@@ -144,7 +142,7 @@ class OutputFileTransferWorker(threading.Thread):
                                 update={'$set': {'FTW_Output_Directives.$.state': EXECUTING},
                                         '$push': {'log': {
                                             'timestamp': datetime.datetime.utcnow(),
-                                            'logentry': 'Starting transfer of %s' % source}}
+                                            'message'  : 'Starting transfer of %s' % source}}
                                 }
                             )
 
@@ -173,7 +171,7 @@ class OutputFileTransferWorker(threading.Thread):
 
                             # If all went fine, update the state of this StagingDirective to Done
                             um_col.find_and_modify(
-                                query={"_id" : ObjectId(compute_unit_id),
+                                query={"_id" : compute_unit_id,
                                        'FTW_Output_Status': EXECUTING,
                                        'FTW_Output_Directives.state': EXECUTING,
                                        'FTW_Output_Directives.source': sd['source'],
@@ -182,23 +180,23 @@ class OutputFileTransferWorker(threading.Thread):
                                 update={'$set': {'FTW_Output_Directives.$.state': DONE},
                                         '$push': {'log': {
                                             'timestamp': datetime.datetime.utcnow(),
-                                            'logentry': log_msg}}
+                                            'message'  : log_msg}}
                                 }
                             )
 
-                    except Exception, ex:
+                    except Exception as e :
                         # Update the CU's state to 'FAILED'.
                         ts = datetime.datetime.utcnow()
-                        log_message = "Output transfer failed: %s\n%s" % (str(ex), traceback.format_exc())
+                        log_message = "Output transfer failed: %s" % e
                         # TODO: not only mark the CU as failed, but also the specific Directive
-                        um_col.update(
-                            {'_id': ObjectId(compute_unit_id)},
-                            {'$set': {'state': FAILED},
-                             '$push': {'statehistory': {'state': FAILED, 'timestamp': ts}},
-                             '$push': {'log': {'logentry': log_message, 'timestamp': ts}}
+                        um_col.update({'_id': compute_unit_id}, {
+                            '$set': {'state': FAILED},
+                            '$push': {
+                                'statehistory': {'state': FAILED, 'timestamp': ts},
+                                'log': {'message': log_message, 'timestamp': ts}
                             }
-                        )
-                        logger.error(log_message)
+                        })
+                        logger.exception (log_message)
 
 
                 # Code below is only to be run by the "first" or only worker
@@ -224,11 +222,11 @@ class OutputFileTransferWorker(threading.Thread):
                     if cu['FTW_Output_Status'] == EXECUTING and \
                             not any(d['state'] == EXECUTING or d['state'] == PENDING for d in cu['FTW_Output_Directives']):
                         # All Output Directives for this FTW are done, mark the CU accordingly
-                        um_col.update({"_id": ObjectId(cu["_id"])},
+                        um_col.update({"_id": cu["_id"]},
                                       {'$set': {'FTW_Output_Status': DONE},
                                        '$push': {'log': {
                                            'timestamp': datetime.datetime.utcnow(),
-                                           'logentry': 'All FTW output staging directives done - %d.' % self._worker_number}}
+                                           'message'  : 'All FTW output staging directives done - %d.' % self._worker_number}}
                                        }
                         )
 
@@ -236,11 +234,11 @@ class OutputFileTransferWorker(threading.Thread):
                     if cu['Agent_Output_Status'] == EXECUTING and \
                             not any(d['state'] == EXECUTING or d['state'] == PENDING for d in cu['Agent_Output_Directives']):
                         # All Output Directives for this Agent are done, mark the CU accordingly
-                        um_col.update({"_id": ObjectId(cu["_id"])},
+                        um_col.update({"_id": cu["_id"]},
                                       {'$set': {'Agent_Output_Status': DONE},
                                        '$push': {'log': {
                                            'timestamp': datetime.datetime.utcnow(),
-                                           'logentry': 'All Agent Output Staging Directives done-%d.' % self._worker_number}}
+                                           'message'  : 'All Agent Output Staging Directives done-%d.' % self._worker_number}}
                                       }
                         )
 
@@ -250,7 +248,10 @@ class OutputFileTransferWorker(threading.Thread):
                 ts = datetime.datetime.utcnow()
                 um_col.find_and_modify(
                     query={"unitmanager": self.unit_manager_id,
-                           "Agent_Output_Status": { "$in": [ None, DONE ] },
+                           # TODO: Now that our state model is linear,
+                           # we probably don't need to check Agent_Output_Status anymore.
+                           # Given that it is not updates by the agent currently, disable it here.
+                           #"Agent_Output_Status": { "$in": [ None, DONE ] },
                            "FTW_Output_Status": { "$in": [ None, DONE ] },
                            "state": STAGING_OUTPUT
                     },
@@ -267,4 +268,4 @@ class OutputFileTransferWorker(threading.Thread):
             logger.exception("output file transfer thread caught system exit -- forcing application shutdown")
             import thread
             thread.interrupt_main ()
-            
+

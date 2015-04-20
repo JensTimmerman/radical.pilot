@@ -8,47 +8,17 @@ List of Pre-Configured Resources
 FUTUREGRID
 ==========
 
-SIERRA
-******
-
-The FutureGrid 'sierra' cluster (https://futuregrid.github.io/manual/hardware.html).
-
-* **Resource label**      : ``futuregrid.sierra``
-* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
-* **Default values** for ComputePilotDescription attributes:
-
- * ``queue         : batch``
- * ``sandbox       : $HOME``
- * ``access_schema : ssh``
-
-* **Available schemas**   : ``ssh``
-
-ALAMO
+BRAVO
 *****
 
-The FutureGrid 'alamo' cluster (https://futuregrid.github.io/manual/hardware.html).
+FutureGrid Hewlett-Packard ProLiant compute cluster (https://futuregrid.github.io/manual/hardware.html).
 
-* **Resource label**      : ``futuregrid.alamo``
+* **Resource label**      : ``futuregrid.bravo``
 * **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
+* **Note**            : Works only up to 64 cores, beyond that Torque configuration is broken.
 * **Default values** for ComputePilotDescription attributes:
 
- * ``queue         : short``
- * ``sandbox       : $HOME``
- * ``access_schema : ssh``
-
-* **Available schemas**   : ``ssh``
-
-HOTEL
-*****
-
-The FutureGrid 'hotel' cluster (https://futuregrid.github.io/manual/hardware.html).
-
-* **Resource label**      : ``futuregrid.hotel``
-* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
-* **Note**            : Due to a broken MPI installation, 'hotel' is currently not usable as agents won't start up / run properly.
-* **Default values** for ComputePilotDescription attributes:
-
- * ``queue         : batch``
+ * ``queue         : bravo``
  * ``sandbox       : $HOME``
  * ``access_schema : ssh``
 
@@ -68,6 +38,108 @@ The FutureGrid 'india' cluster (https://futuregrid.github.io/manual/hardware.htm
  * ``access_schema : ssh``
 
 * **Available schemas**   : ``ssh``
+
+ECHO
+****
+
+FutureGrid Supermicro ScaleMP cluster (https://futuregrid.github.io/manual/hardware.html).
+
+* **Resource label**      : ``futuregrid.echo``
+* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
+* **Note**            : Untested
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : echo``
+ * ``sandbox       : $HOME``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+XRAY
+****
+
+FutureGrid Cray XT5m cluster (https://futuregrid.github.io/manual/hardware.html).
+
+* **Resource label**      : ``futuregrid.xray``
+* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
+* **Note**            : One needs to add 'module load torque' to ~/.profile on xray.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : batch``
+ * ``sandbox       : /scratch/$USER``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+XRAY_CCM
+********
+
+FutureGrid Cray XT5m cluster in Cluster Compatibility Mode (CCM) (https://futuregrid.github.io/manual/hardware.html).
+
+* **Resource label**      : ``futuregrid.xray_ccm``
+* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
+* **Note**            : One needs to add 'module load torque' to ~/.profile on xray.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : ccm_queue``
+ * ``sandbox       : /scratch/$USER``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+DELTA
+*****
+
+FutureGrid Supermicro GPU cluster (https://futuregrid.github.io/manual/hardware.html).
+
+* **Resource label**      : ``futuregrid.delta``
+* **Raw config**          : :download:`futuregrid.json <../../src/radical/pilot/configs/futuregrid.json>`
+* **Note**            : Untested.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : delta``
+ * ``sandbox       : $HOME``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+STFC
+====
+
+JOULE
+*****
+
+The STFC Joule IBM BG/Q system (http://community.hartree.stfc.ac.uk/wiki/site/admin/home.html)
+
+* **Resource label**      : ``stfc.joule``
+* **Raw config**          : :download:`stfc.json <../../src/radical/pilot/configs/stfc.json>`
+* **Note**            : This currently needs an outbound ssh tunnel.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : prod``
+ * ``sandbox       : $HOME``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+NCSA
+====
+
+BW
+**
+
+The NCSA Blue Waters Cray XE6/XK7 system (https://bluewaters.ncsa.illinois.edu/)
+
+* **Resource label**      : ``ncsa.bw``
+* **Raw config**          : :download:`ncsa.json <../../src/radical/pilot/configs/ncsa.json>`
+* **Note**            : Running 'touch .hushlogin' on the login node will reduce the likelihood of prompt detection issues.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : normal``
+ * ``sandbox       : /scratch/sciteam/$USER``
+ * ``access_schema : gsissh``
+
+* **Available schemas**   : ``gsissh``
 
 RADICAL
 =======
@@ -184,7 +256,7 @@ IU
 BIGRED2
 *******
 
-Indiana University's HPC cluster (https://kb.iu.edu/d/bcqt).
+Indiana University's Cray XE6/XK7 cluster (https://kb.iu.edu/d/bcqt).
 
 * **Resource label**      : ``iu.bigred2``
 * **Raw config**          : :download:`iu.json <../../src/radical/pilot/configs/iu.json>`
@@ -194,22 +266,7 @@ Indiana University's HPC cluster (https://kb.iu.edu/d/bcqt).
  * ``sandbox       : $HOME``
  * ``access_schema : ssh``
 
-* **Available schemas**   : ``ssh, gsissh``
-
-QUARRY
-******
-
-The Quarry Linux cluster at Indiana University (https://kb.iu.edu/d/avkx).
-
-* **Resource label**      : ``iu.quarry``
-* **Raw config**          : :download:`iu.json <../../src/radical/pilot/configs/iu.json>`
-* **Default values** for ComputePilotDescription attributes:
-
- * ``queue         : None``
- * ``sandbox       : $HOME``
- * ``access_schema : ssh``
-
-* **Available schemas**   : ``ssh, gsissh``
+* **Available schemas**   : ``ssh``
 
 EPSRC
 =====
@@ -233,18 +290,66 @@ The EPSRC Archer Cray XC30 system (https://www.archer.ac.uk/)
 NERSC
 =====
 
+EDISON_CCM
+**********
+
+The NERSC Edison Cray XC30 in Cluster Compatibility Mode (https://www.nersc.gov/users/computational-systems/edison/)
+
+* **Resource label**      : ``nersc.edison_ccm``
+* **Raw config**          : :download:`nersc.json <../../src/radical/pilot/configs/nersc.json>`
+* **Note**            : In a fresh virtualenv, run 'easy_install pip==1.2.1' to avoid ssl errors.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : ccm_queue``
+ * ``sandbox       : $SCRATCH``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+EDISON
+******
+
+The NERSC Edison Cray XC30 (https://www.nersc.gov/users/computational-systems/edison/)
+
+* **Resource label**      : ``nersc.edison``
+* **Raw config**          : :download:`nersc.json <../../src/radical/pilot/configs/nersc.json>`
+* **Note**            : In a fresh virtualenv, run 'easy_install pip==1.2.1' to avoid ssl errors.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : regular``
+ * ``sandbox       : $SCRATCH``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
 HOPPER
 ******
 
-The Nersc Hopper Cray XE6 (https://www.nersc.gov/users/computational-systems/hopper/)
+The NERSC Hopper Cray XE6 (https://www.nersc.gov/users/computational-systems/hopper/)
 
 * **Resource label**      : ``nersc.hopper``
 * **Raw config**          : :download:`nersc.json <../../src/radical/pilot/configs/nersc.json>`
 * **Note**            : In a fresh virtualenv, run 'easy_install pip==1.2.1' to avoid ssl errors.
 * **Default values** for ComputePilotDescription attributes:
 
- * ``queue         : debug``
- * ``sandbox       : /scratch/scratchdirs/$USER``
+ * ``queue         : regular``
+ * ``sandbox       : $SCRATCH``
+ * ``access_schema : ssh``
+
+* **Available schemas**   : ``ssh``
+
+HOPPER_CCM
+**********
+
+The NERSC Hopper Cray XE6 in Cluster Compatibility Mode (https://www.nersc.gov/users/computational-systems/hopper/)
+
+* **Resource label**      : ``nersc.hopper_ccm``
+* **Raw config**          : :download:`nersc.json <../../src/radical/pilot/configs/nersc.json>`
+* **Note**            : In a fresh virtualenv, run 'easy_install pip==1.2.1' to avoid ssl errors.
+* **Default values** for ComputePilotDescription attributes:
+
+ * ``queue         : ccm_queue``
+ * ``sandbox       : $SCRATCH``
  * ``access_schema : ssh``
 
 * **Available schemas**   : ``ssh``
