@@ -66,26 +66,31 @@ class ComputeUnit(object):
         if ud and uid:
             raise ValueError ("need either compute unit description of ID for object creation, not both")
 
-        # sanity check on description
-        if not (ud.get('executable') or ud.get('kernel')):
-            raise PilotException ("ComputeUnitDescription needs an executable or application kernel")
-
         # 'static' members
         if ud:
+
+            # sanity check on description
+            if not (ud.get('executable') or ud.get('kernel')):
+                raise ValueError("Compute Unit needs an executable or application kernel")
+
+            # Validate number of cores
+            if not ud.cores:
+                raise ValueError("Can't run a Compute Unit with %d cores." % ud.cores)
+
             self._data['_id']         = ru.generate_id('unit.%(counter)06d', ru.ID_CUSTOM)
-            self._data['description'] = copy.deepcopy (ud)  # keep the original ud reusable
+            self._data['description'] = copy.deepcopy (ud) # keep the original ud reusable
 
             # expand any staging directives
             expand_staging_directives(self._data['description'],  logger)
 
-        else:
-            pass
-            # FIXME: reconnect!
-          # self._description = None
-          # self._uid         = None
 
-        self._uid         = self._description['_id']
-        self._name        = self._description.get ('name')
+        else:
+
+            # FIXME: reconnect!
+            raise NotImplementedError ('reconnect not yet implemented')
+
+
+        self._uid = self._data['_id']
 
 
 

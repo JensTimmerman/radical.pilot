@@ -18,11 +18,13 @@ def get_mongodb(mongodb_url, mongodb_name, mongodb_auth):
     mongo_client = pymongo.MongoClient(mongodb_url)
     mongo_db     = mongo_client[mongodb_name]
 
-    # do auth on username and password, if available
+    # do auth on username *and* password (ignore empty split results)
     if mongodb_auth:
-        mongo_db.authenticate(mongodb_auth.split(':'))
+        username, passwd = mongodb_auth.split(':')
+        mongo_db.authenticate(username, passwd)
 
     return mongo_db
+
 
 # ------------------------------------------------------------------------------
 #
@@ -54,92 +56,50 @@ def timestamp_now():
 # If 'RADICAL_PILOT_PROFILE' is set in environment, we log timed events.
 #
 if 'RADICAL_PILOT_PROFILE' in os.environ:
-    profile_rp     = True
+    profile_rp = True
     _profile_handle = open('agent.prof', 'a')
 else:
-    profile_rp     = False
+    profile_rp = False
     _profile_handle = sys.stdout
+
+def flush_prof():
+    if profile_rp:
+        _profile_handle.flush()
 
 
 # ------------------------------------------------------------------------------
 #
-_profile_tags  = dict()
-_profile_freqs = dict()
+# FIXME: AGENT_MODE should not live here...
+AGENT_THREADS   = 'threading'
+AGENT_PROCESSES = 'multiprocessing'
+AGENT_MODE      = AGENT_THREADS
 
-def prof(etype, uid="", msg="", tag="", logger=None):
+def prof(etype, uid="", msg="", logger=None):
 
     # record a timed event.  We record the thread ID, the uid of the affected
-    # object, a log message, event type, and a tag.  Whenever a tag changes (to
-    # a non-None value), the time since the last tag change is added.  This can
-    # be used to derive, for example, the duration which a uid spent in
-    # a certain state.  Time intervals between the same tags (but different
-    # uids) are recorded, too.
-    #
-    # TODO: should this move to utils?  Or at least RP utils, so that we can
-    # also use it for the application side?
+    # object, an event type, and a log message.
 
+    # TODO: Why are we logging events when profiling is disabled?
     if logger:
-        logger("%s -- %s (%s): %s", etype, msg, uid, tag)
-
+        logger("%s (%10s) : %s", etype, msg, uid)
 
     if not profile_rp:
         return
 
+    now = timestamp_now()
 
-    logged = False
-    now    = timestamp_now()
+    if   AGENT_MODE == AGENT_THREADS  : tid = threading.current_thread().name
+    elif AGENT_MODE == AGENT_PROCESSES: tid = os.getpid()
+    else: raise Exception('Unknown Agent Mode')
 
-    # FIXME: performance penalty due to repeated calls.  tid should be part of
-    # the signature...
-    tid = threading.current_thread().name
-    if tid == 'MainThread' :
-        tid = os.getpid ()
+    # NOTE: Don't forget to sync any format changes in the bootstrapper
+    # and downstream analysis tools too!
+    _profile_handle.write("%.4f,%s,%s,%s,%s\n" % (now, tid, uid, etype, msg))
 
-    if uid and tag:
-
-        if not uid in _profile_tags:
-            _profile_tags[uid] = {'tag'  : "",
-                                 'time' : 0.0 }
-
-        old_tag = _profile_tags[uid]['tag']
-
-        if tag != old_tag:
-
-            tagged_time = now - _profile_tags[uid]['time']
-
-            _profile_tags[uid]['tag' ] = tag
-            _profile_tags[uid]['time'] = timestamp_now()
-
-            _profile_handle.write("> %12.4f : %-20s : %12.4f : %-17s : %-24s : %-40s : %s\n" \
-                                  % (tagged_time, tag, now, tid, uid, etype, msg))
-            logged = True
-
-
-            if not tag in _profile_freqs:
-                _profile_freqs[tag] = {'last'  : now,
-                                      'diffs' : list()}
-            else:
-                diff = now - _profile_freqs[tag]['last']
-                _profile_freqs[tag]['diffs'].append(diff)
-                _profile_freqs[tag]['last' ] = now
-
-              # freq = sum(_profile_freqs[tag]['diffs']) / len(_profile_freqs[tag]['diffs'])
-              #
-              # _profile_handle.write("> %12s : %-20.4f : %12s : %-17s : %-24s : %-40s : %s\n" \
-              #                       % ('frequency', freq, '', '', '', '', ''))
-
-
-
-    if not logged:
-        _profile_handle.write("  %12s : %-20s : %12.4f : %-17s : %-24s : %-40s : %s\n" \
-                              % (' ' , ' ', now, tid, uid, etype, msg))
-  
-    # FIXME: disable flush on production runs
-    _profile_handle.flush()
-     
 
 # ------------------------------------------------------------------------------
 #
+# max number of cu out/err chars to push to tail
 MAX_IO_LOGLENGTH = 1024
 def tail(txt, maxlen=MAX_IO_LOGLENGTH):
 
@@ -158,9 +118,12 @@ def tail(txt, maxlen=MAX_IO_LOGLENGTH):
 
 # ------------------------------------------------------------------------------
 #
-def blowup(config, cus, component):
+def blowup(config, cus, component, logger=None):
     # for each cu in cu_list, add 'factor' clones just like it, just with
     # a different ID (<id>.clone_001)
+
+    # TODO: I dont like it that there is non blow-up semantics in the blow-up function.
+    # Probably want to put the conditional somewhere else.
 
     if not isinstance (cus, list) :
         cus = [cus]
@@ -169,7 +132,7 @@ def blowup(config, cus, component):
         return cus
 
     factor = config['blowup_factor'].get (component, 1)
-    drop   = config['drop_clones']  .get (component, False)
+    drop   = config['drop_clones']  .get (component, 1)
 
     ret = list()
 
@@ -177,11 +140,17 @@ def blowup(config, cus, component):
 
         uid = cu['_id']
 
-        if drop :
+        if drop >= 1:
+            # drop clones --> drop matching uid's
             if '.clone_' in uid :
-                prof ('drop', uid=uid)
+                prof ('drop clone', msg=component, uid=uid)
                 continue
-        
+
+        if drop >= 2:
+            # drop everything, even original units
+            prof ('drop', msg=component, uid=uid)
+            continue
+
         factor -= 1
         if factor :
             for idx in range(factor) :
@@ -195,7 +164,7 @@ def blowup(config, cus, component):
 
                 idx += 1
                 ret.append (cu_clone)
-                prof('cloned unit ingest (%s)' % component, uid=clone_id)
+                prof('add clone', msg=component, uid=clone_id)
 
         # append the original unit last, to  increase the likelyhood that
         # application state only advances once all clone states have also
@@ -207,7 +176,7 @@ def blowup(config, cus, component):
 
 # ------------------------------------------------------------------------------
 #
-def rusage():
+def get_rusage():
 
     import resource
 
@@ -223,6 +192,20 @@ def rusage():
          % (rtime, utime, stime, rss)
 
 
+# ------------------------------------------------------------------------------
+#
+def rec_makedir(target):
+
+    # recursive makedir which ignores errors if dir already exists
+
+    try:
+        os.makedirs(target)
+    except OSError as e:
+        # ignore failure on existing directory
+        if e.errno == errno.EEXIST and os.path.isdir(os.path.dirname(target)):
+            pass
+        else:
+            raise
 
 
 # ------------------------------------------------------------------------------

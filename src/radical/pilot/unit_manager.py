@@ -17,9 +17,13 @@ import multiprocessing
 
 import radical.utils as ru
 
+
 from radical.pilot.types           import *
 from radical.pilot.states          import *
 from radical.pilot.exceptions      import *
+
+from radical.pilot.controller      import UnitManagerController
+from radical.pilot.scheduler       import get_scheduler, SCHED_DEFAULT
 
 from radical.pilot.compute_unit    import ComputeUnit
 from radical.pilot.utils.logger    import logger
@@ -177,6 +181,8 @@ class UnitManager(COMPONENT_TYPE):
             # FIXME: re-implement reconnect.  Basically need to dig out the
             # pilot handles...
             self._uid = uid
+            raise NotImplementedError ('reconnect is not yet implemented')
+
 
         else :
             self._uid = ru.generate_id('umgr.%(counter)02d', ru.ID_CUSTOM)

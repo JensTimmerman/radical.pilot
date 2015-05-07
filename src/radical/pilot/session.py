@@ -186,13 +186,14 @@ class Session(saga.Session):
         for config_file in config_files:
 
             try:
+                self._log.info("Load resource configurations from %s" % config_file)
                 rcs = ResourceConfig.from_file(config_file)
             except Exception as e:
                 self._log.error("skip config file %s: %s", config_file, e)
                 continue
 
             for rc in rcs:
-                self._log.info("Loaded resource configurations for %s", rc)
+                self._log.info("Load resource configurations for %s" % rc)
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
         user_cfgs     = "%s/.radical/pilot/configs/*.json" % os.environ.get('HOME')
@@ -228,6 +229,12 @@ class Session(saga.Session):
             # FIXME: reconnect
             raise NotImplementedError('oops')
 
+          # # otherwise, we reconnect to an existing session
+          # self._dbs, session_info, self._connection_info = \
+          #         dbSession.reconnect(sid     = self._uid, 
+          #                             db_url  = self._database_url,
+          #                             db_name = self._database_name)
+
         else:
             try:
                 self._connected  = None
@@ -244,7 +251,6 @@ class Session(saga.Session):
                 self._log.exception('session create failed')
                 raise PilotException("Couldn't create new session (database URL '%s' incorrect?): %s" \
                                 % (self._database_url, ex))  
-
 
 
         self._worker_list  = list()
@@ -273,7 +279,7 @@ class Session(saga.Session):
 
     #---------------------------------------------------------------------------
     #
-    def close(self, cleanup=True, terminate=True):
+    def close(self, cleanup=None, terminate=None, delete=None):
         """Closes the session.
 
         All subsequent attempts access objects attached to the session will 
@@ -300,7 +306,23 @@ class Session(saga.Session):
             self._log.error("Session object already closed.")
             return
 
-        if cleanup:
+        # set defaults
+        if cleanup   == None: cleanup   = True
+        if terminate == None: terminate = True
+
+        # we keep 'delete' for backward compatibility.  If it was set, and the
+        # other flags (cleanup, terminate) are as defaulted (True), then delete
+        # will supercede them.  Delete is considered deprecated though, and
+        # we'll thus issue a warning.
+        if delete != None:
+
+            if  cleanup == True and terminate == True :
+                cleanup   = delete
+                terminate = delete
+                logger.warning("'delete' flag on session is deprecated. " \
+                               "Please use 'cleanup' and 'terminate' instead!")
+
+        if  cleanup :
             # cleanup implies terminate
             terminate = True
 
@@ -507,8 +529,7 @@ class Session(saga.Session):
 
            For example::
 
-                  rc = radical.pilot.ResourceConfig
-                  rc.name                 = "mycluster"
+                  rc = radical.pilot.ResourceConfig(label="mycluster")
                   rc.job_manager_endpoint = "ssh+pbs://mycluster
                   rc.filesystem_endpoint  = "sftp://mycluster
                   rc.default_queue        = "private"
@@ -538,7 +559,7 @@ class Session(saga.Session):
                 self._resource_configs[rc] = rcs[rc].as_dict() 
 
         else:
-            self._resource_configs [resource_config.name] = resource_config.as_dict()
+            self._resource_configs[resource_config.label] = resource_config.as_dict()
 
 
     # -------------------------------------------------------------------------
@@ -566,14 +587,15 @@ class Session(saga.Session):
             if 'schemas' in resource_cfg:
                 schema = resource_cfg['schemas'][0]
 
-        if schema not in resource_cfg:
-            raise RuntimeError("schema %s unknown for resource %s" \
-                             % (schema, resource_key))
+        if  schema:
+            if  schema not in resource_cfg :
+                raise RuntimeError ("schema %s unknown for resource %s" \
+                                  % (schema, resource_key))
 
-        for key in resource_cfg[schema]:
-            # merge schema specific resource keys into the
-            # resource config
-            resource_cfg[key] = resource_cfg[schema][key]
+            for key in resource_cfg[schema] :
+                # merge schema specific resource keys into the
+                # resource config
+                resource_cfg[key] = resource_cfg[schema][key]
 
         return resource_cfg
 
