@@ -154,8 +154,8 @@ class UnitUpdater(threading.Thread):
     # --------------------------------------------------------------------------
     #
     # insert_session, get_session and delete_session are not enacted over the
-    # updater queue -- (insert/get need to happen before the updater thread(s) attach
-    # to the database)
+    # updater queue -- (insert/get need to happen before the updater thread(s)
+    # attach to the database)
     #
     @staticmethod
     def insert_session(dburl, sid, config):
