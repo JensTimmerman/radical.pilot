@@ -624,13 +624,16 @@ class Scheduler(threading.Thread):
         rpu.prof('schedule', msg="allocated", uid=cu['_id'], logger=self._log.warn)
         self._log.info (self.slot_status())
 
-        cu_list = rpu.blowup(self._config, cu, EXECUTION_QUEUE)
+        cu_list, cu_dropped = rpu.blowup(self._config, cu, EXECUTION_QUEUE)
         for _cu in cu_list :
             rpu.prof('put', msg="Scheduler to execution_queue (%s)" % _cu['state'], uid=_cu['_id'])
             UnitUpdater.update_unit(queue = self._update_queue, 
                                     cu    = cu,
                                     state = rp.EXECUTION_PENDING)
             self._execution_queue.put(_cu)
+
+        # we need to free allocated cores for dropped CUs
+        self.unschedule(cu_dropped)
 
         return True
 
@@ -737,7 +740,7 @@ class Scheduler(threading.Thread):
                                             cu    = cu,
                                             state = rp.AGENT_SCHEDULING)
 
-                    cu_list  = rpu.blowup(self._config, cu, SCHEDULER)
+                    cu_list, _  = rpu.blowup(self._config, cu, SCHEDULER)
                     for _cu in cu_list:
 
                         # we got a new unit to schedule.  Either we can place 
@@ -862,8 +865,7 @@ class SchedulerContinuous(Scheduler):
 
         # TODO: single_node should be enforced for e.g. non-message passing
         #       tasks, but we don't have that info here.
-        # NOTE AM: why should non-messaging tasks be confined to one node?
-        if cores_requested < self._lrms.cores_per_node:
+        if cores_requested <= self._lrms.cores_per_node:
             single_node = True
         else:
             single_node = False
@@ -3293,7 +3295,7 @@ class ExecWorker(COMPONENT_TYPE):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, config, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id):
@@ -3307,7 +3309,6 @@ class ExecWorker(COMPONENT_TYPE):
         self._config           = config
         self._log              = logger
         self._agent            = agent
-        self._lrms             = lrms
         self._scheduler        = scheduler
         self._task_launcher    = task_launcher
         self._mpi_launcher     = mpi_launcher
@@ -3327,7 +3328,7 @@ class ExecWorker(COMPONENT_TYPE):
     # This class-method creates the appropriate sub-class for the Launch Method.
     #
     @classmethod
-    def create(cls, name, config, logger, spawner, agent, lrms, scheduler,
+    def create(cls, name, config, logger, spawner, agent, scheduler,
                task_launcher, mpi_launcher, command_queue,
                execution_queue, update_queue, schedule_queue, 
                stageout_queue, pilot_id, session_id):
@@ -3342,7 +3343,7 @@ class ExecWorker(COMPONENT_TYPE):
                 SPAWNER_NAME_SHELL : ExecWorker_SHELL
             }[spawner]
 
-            impl = implementation(name, config, logger, agent, lrms, scheduler,
+            impl = implementation(name, config, logger, agent, scheduler,
                                   task_launcher, mpi_launcher, command_queue,
                                   execution_queue, stageout_queue, update_queue, 
                                   schedule_queue, pilot_id, session_id)
@@ -3395,7 +3396,7 @@ class ExecWorker_POPEN (ExecWorker) :
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, config, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id):
@@ -3408,7 +3409,7 @@ class ExecWorker_POPEN (ExecWorker) :
         self._cu_environment = self._populate_cu_environment()
 
 
-        ExecWorker.__init__ (self, name, config, logger, agent, lrms, scheduler,
+        ExecWorker.__init__ (self, name, config, logger, agent, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue, 
                  schedule_queue, pilot_id, session_id)
@@ -3485,7 +3486,7 @@ class ExecWorker_POPEN (ExecWorker) :
 
                 try:
 
-                    cu_list = rpu.blowup(self._config, cu, EXEC_WORKER)
+                    cu_list, _ = rpu.blowup(self._config, cu, EXEC_WORKER)
                     for _cu in cu_list:
 
                         if _cu['description']['mpi']:
@@ -3649,7 +3650,7 @@ class ExecWorker_POPEN (ExecWorker) :
                                 cu    = cu,
                                 state = rp.EXECUTING)
 
-        cu_list = rpu.blowup(self._config, cu, WATCH_QUEUE)
+        cu_list, _ = rpu.blowup(self._config, cu, WATCH_QUEUE)
         for _cu in cu_list :
             rpu.prof('put', msg="ExecWorker to watcher (%s)" % _cu['state'], uid=_cu['_id'])
             self._watch_queue.put(_cu)
@@ -3704,7 +3705,7 @@ class ExecWorker_POPEN (ExecWorker) :
                 for cu in cus :
                     
                     rpu.prof('get', msg="ExecWatcher picked up unit", uid=cu['_id'])
-                    cu_list = rpu.blowup(self._config, cu, WATCHER)
+                    cu_list, _ = rpu.blowup(self._config, cu, WATCHER)
 
                     for _cu in cu_list :
                         self._cus_to_watch.append (_cu)
@@ -3790,7 +3791,8 @@ class ExecWorker_POPEN (ExecWorker) :
                     UnitUpdater.update_unit(queue = self._update_queue, 
                                             cu    = cu,
                                             state = rp.AGENT_STAGING_OUTPUT_PENDING)
-                    cu_list = rpu.blowup(self._config, cu, STAGEOUT_QUEUE)
+
+                    cu_list, _ = rpu.blowup(self._config, cu, STAGEOUT_QUEUE)
                     for _cu in cu_list :
                         rpu.prof('put', msg="ExecWatcher to stageout_queue (%s)" % _cu['state'], uid=_cu['_id'])
                         self._stageout_queue.put(_cu)
@@ -3805,12 +3807,14 @@ class ExecWorker_SHELL(ExecWorker):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self, name, config, logger, agent, lrms, scheduler,
+    def __init__(self, name, config, logger, agent, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue,
                  schedule_queue, pilot_id, session_id):
 
-        ExecWorker.__init__ (self, name, config, logger, agent, lrms, scheduler,
+        rpu.prof('ExecWorker init')
+
+        ExecWorker.__init__ (self, name, config, logger, agent, scheduler,
                  task_launcher, mpi_launcher, command_queue,
                  execution_queue, stageout_queue, update_queue,
                  schedule_queue, pilot_id, session_id)
@@ -3863,6 +3867,12 @@ class ExecWorker_SHELL(ExecWorker):
         self.workdir = "%s/spawner.%s" % (os.getcwd(), self.name)
         rec_makedir(self.workdir)
 
+        # to run the spawner shells remote, run the following command on the
+        # target node:
+        #   "nc -l -p <port> -v -e /bin/sh  %s/agent/radical-pilot-spawner.sh %s"
+        # and then below run
+        #   "nc <node_ip> <port>"
+        # with unique port numbers for each ExecWorker instance, obviously.
         ret, out, _  = self.launcher_shell.run_sync \
                            ("/bin/sh %s/agent/radical-pilot-spawner.sh %s" \
                            % (os.path.dirname (rp.__file__), self.workdir))
@@ -3905,7 +3915,7 @@ class ExecWorker_SHELL(ExecWorker):
 
                 try:
 
-                    cu_list = rpu.blowup(self._config, cu, EXEC_WORKER)
+                    cu_list, _ = rpu.blowup(self._config, cu, EXEC_WORKER)
                     for _cu in cu_list :
 
                         if _cu['description']['mpi']:
@@ -4272,7 +4282,8 @@ class ExecWorker_SHELL(ExecWorker):
                                     cu    = cu,
                                     state = rp.AGENT_STAGING_OUTPUT_PENDING)
 
-            cu_list = rpu.blowup(self._config, cu, STAGEOUT_QUEUE)
+            cu_list, _ = rpu.blowup(self._config, cu, STAGEOUT_QUEUE)
+
             for _cu in cu_list :
                 rpu.prof('put', msg="ExecWatcher to stageout_queue (%s)" % _cu['state'], uid=_cu['_id'])
                 self._stageout_queue.put(_cu)
@@ -4281,6 +4292,157 @@ class ExecWorker_SHELL(ExecWorker):
         with self._registry_lock :
             if pid in self._registry :  # why wouldn't it be in there though?
                 del(self._registry[pid])
+
+
+## # ==============================================================================
+## #
+## class UpdateWorker(threading.Thread):
+##     """
+##     An UpdateWorker pushes CU and Pilot state updates to mongodb.  Its instances
+##     compete for update requests on the update_queue.  Those requests will be
+##     triplets of collection name, query dict, and update dict.  Update requests
+##     will be collected into bulks over some time (BULK_COLLECTION_TIME), to
+##     reduce number of roundtrips.
+##     """
+## 
+##     # --------------------------------------------------------------------------
+##     #
+##     def __init__(self, name, config, logger, agent, session_id,
+##                  update_queue, mongodb_url, mongodb_name, mongodb_auth):
+## 
+##         threading.Thread.__init__(self)
+## 
+##         self.name           = name
+##         self._config        = config
+##         self._log           = logger
+##         self._agent         = agent
+##         self._session_id    = session_id
+##         self._update_queue  = update_queue
+##         self._terminate     = threading.Event()
+## 
+##         self._mongo_db      = rpu.get_mongodb(mongodb_url, mongodb_name, mongodb_auth)
+##         self._cinfo         = dict()  # collection cache
+## 
+##         # run worker thread
+##         self.start()
+## 
+##     # --------------------------------------------------------------------------
+##     #
+##     def stop(self):
+## 
+##         rpu.prof ('stop request')
+##         rpu.flush_prof()
+##         self._terminate.set()
+## 
+## 
+##     # --------------------------------------------------------------------------
+##     #
+##     def run(self):
+## 
+##         rpu.prof('run')
+##         while not self._terminate.is_set():
+## 
+##             # ------------------------------------------------------------------
+##             def timed_bulk_execute(cinfo):
+## 
+##                 # returns number of bulks pushed (0 or 1)
+##                 if not cinfo['bulk']:
+##                     return 0
+## 
+##                 now = time.time()
+##                 age = now - cinfo['last']
+## 
+##                 if cinfo['bulk'] and age > self._config['bulk_collection_time']:
+## 
+##                     res  = cinfo['bulk'].execute()
+##                     self._log.debug("bulk update result: %s", res)
+## 
+##                     rpu.prof('unit update bulk pushed (%d)' % len(cinfo['uids']))
+##                     for entry in cinfo['uids']:
+##                         uid   = entry[0]
+##                         state = entry[1]
+##                         if state:
+##                             rpu.prof('unit update pushed (%s)' % state, uid=uid)
+##                         else:
+##                             rpu.prof('unit update pushed', uid=uid)
+## 
+##                     cinfo['last'] = now
+##                     cinfo['bulk'] = None
+##                     cinfo['uids'] = list()
+##                     return 1
+## 
+##                 else:
+##                     return 0
+##             # ------------------------------------------------------------------
+## 
+##             try:
+## 
+##                 try:
+##                     update_request = self._update_queue.get_nowait()
+##                     uid   = update_request.get('_id',   None)
+##                     state = update_request.get('state', None)
+## 
+##                 except Queue.Empty:
+## 
+##                     # no new requests: push any pending bulks
+##                     action = 0
+##                     for cname in self._cinfo:
+##                         action += timed_bulk_execute(self._cinfo[cname])
+## 
+##                     if not action:
+##                         time.sleep(self._config['db_poll_sleeptime'])
+## 
+##                     continue
+## 
+## 
+##                 uid   = update_request.get('_id')
+##                 state = update_request.get('state', None)
+## 
+##                 if state :
+##                     rpu.prof('get', msg="update_queue to UpdateWorker (%s)" % state, uid=uid)
+##                 else:
+##                     rpu.prof('get', msg="update_queue to UpdateWorker", uid=uid)
+## 
+##                 update_request_list, _ = rpu.blowup(self._config, update_request, UPDATE_WORKER)
+## 
+##                 for _update_request in update_request_list :
+## 
+##                     # got a new request.  Add to bulk (create as needed),
+##                     # and push bulk if time is up.
+##                     uid         = _update_request.get('_id')
+##                     state       = _update_request.get('state', None)
+##                     cbase       = _update_request.get('cbase', '.cu')
+##                     query_dict  = _update_request.get('query', dict())
+##                     update_dict = _update_request.get('update',dict())
+## 
+##                     cname = self._session_id + cbase
+## 
+##                     if not cname in self._cinfo:
+##                         self._cinfo[cname] = {
+##                                 'coll' : self._mongo_db[cname],
+##                                 'bulk' : None,
+##                                 'last' : time.time(),  # time of last push
+##                                 'uids' : list()
+##                                 }
+## 
+##                     cinfo = self._cinfo[cname]
+## 
+##                     if not cinfo['bulk']:
+##                         cinfo['bulk']  = cinfo['coll'].initialize_ordered_bulk_op()
+## 
+##                     cinfo['uids'].append([uid, state])
+##                     cinfo['bulk'].find  (query_dict) \
+##                                  .update(update_dict)
+## 
+##                     timed_bulk_execute(cinfo)
+##                     rpu.prof('unit update bulked (%s)' % state, uid=uid)
+## 
+##             except Exception as e:
+##                 self._log.exception("unit update failed (%s)", e)
+##                 # FIXME: should we fail the pilot at this point?
+##                 # FIXME: Are the strategies to recover?
+## 
+##         rpu.prof ('stop')
 
 
 # ==============================================================================
@@ -4334,14 +4496,14 @@ class StageinWorker(threading.Thread):
                     rpu.prof('get_cmd', msg="stagein_queue to StageinWorker (wakeup)")
                     continue
 
+                cu['state'] = rp.AGENT_STAGING_INPUT
                 rpu.prof('get', msg="stagein_queue to StageinWorker (%s)" % cu['state'], uid=cu['_id'])
 
-                cu['state'] = rp.STAGING_INPUT
                 UnitUpdater.update_unit(queue = self._update_queue, 
                                         cu    = cu,
                                         state = rp.AGENT_STAGING_INPUT)
 
-                cu_list = rpu.blowup(self._config, cu, STAGEIN_WORKER)
+                cu_list, _ = rpu.blowup(self._config, cu, STAGEIN_WORKER)
                 for _cu in cu_list :
 
                     sandbox      = os.path.join(self._workdir, '%s' % _cu['_id'])
@@ -4396,7 +4558,6 @@ class StageinWorker(threading.Thread):
 
                             log_message = "%s'ed %s to %s - success" % (directive['action'], source, abs_target)
                             self._log.info(log_message)
-
 
                         except Exception as e:
 
@@ -4502,7 +4663,7 @@ class StageoutWorker(threading.Thread):
 
                 rpu.prof('get', msg="stageout_queue to StageoutWorker (%s)" % cu['state'], uid=cu['_id'])
 
-                cu_list = rpu.blowup(self._config, cu, STAGEOUT_WORKER)
+                cu_list, _ = rpu.blowup(self._config, cu, STAGEOUT_WORKER)
                 for _cu in cu_list :
 
                     sandbox = os.path.join(self._workdir, '%s' % _cu['_id'])
@@ -4858,7 +5019,6 @@ class Agent(object):
                 spawner         = spawner,
                 logger          = self._log,
                 agent           = self,
-                lrms            = self._lrms,
                 scheduler       = self._scheduler,
                 task_launcher   = self._task_launcher,
                 mpi_launcher    = self._mpi_launcher,
@@ -4957,7 +5117,7 @@ class Agent(object):
         else:
             rpu.prof('put', msg="%s to update_queue" % src, uid=query_dict['_id'])
 
-        query_list = rpu.blowup(self._config, query_dict, UPDATE_QUEUE)
+        query_list, _ = rpu.blowup(self._config, query_dict, UPDATE_QUEUE)
 
         for _query_dict in query_list :
             self._update_queue.put({'_id'    : _query_dict['_id'],
@@ -5085,7 +5245,7 @@ class Agent(object):
     #
     def _check_units(self):
 
-        # Check if there are compute units waiting for execution,
+        # Check if there are compute units waiting for input staging
         # and log that we pulled it.
         #
         # FIXME: Unfortunately, 'find_and_modify' is not bulkable, so we have
@@ -5110,7 +5270,6 @@ class Agent(object):
                 spec     = {"_id"   : {"$in"     : cu_uids}},
                 document = {"$set"  : {"control" : "agent"}})
 
-
         # now we really own the CUs, and can start working on them (ie. push
         # them into the pipeline)
         rpu.prof('Agent get units', msg="bulk size: %d" % cu_cursor.count(),
@@ -5121,7 +5280,7 @@ class Agent(object):
 
             rpu.prof('get', msg="MongoDB to Agent (%s)" % cu['state'], uid=cu['_id'], logger=self._log.info)
 
-            _cu_list = rpu.blowup(self._config, cu, AGENT)
+            _cu_list, _ = rpu.blowup(self._config, cu, AGENT)
             for _cu in _cu_list :
 
                 try:
@@ -5152,8 +5311,9 @@ class Agent(object):
                     rpu.prof('Agent get unit mkdir', uid=_cu['_id'])
 
                     # and send to staging 
-                    for __cu in rpu.blowup (self._config, _cu, STAGEIN):
-                        rpu.prof('push', msg="towards stagein", uid=__cu['_id'], tag='ingest')
+                    _cu_list, _ = rpu.blowup(self._config, _cu, STAGEIN_QUEUE)
+                    for __cu in _cu_list :
+                        rpu.prof('put', msg="Agent to stagein_queue (%s)" % __cu['state'], uid=__cu['_id'])
                         self._stagein_queue.put(__cu)
 
 
@@ -5204,7 +5364,7 @@ def main():
 
     if args : parser.error("Unused arguments '%s'" % args)
 
-    if not options.cores                : parser.error("Missing number of cores (-c)")
+    if not options.cores                : parser.error("Missing or zero number of cores (-c)")
     if not options.debug_level          : parser.error("Missing DEBUG level (-d)")
     if not options.task_launch_method   : parser.error("Missing unit launch method (-j)")
     if not options.mpi_launch_method    : parser.error("Missing mpi launch method (-k)")
@@ -5214,10 +5374,10 @@ def main():
     if not options.spawner              : parser.error("Missing agent spawner (-o)")
     if not options.pilot_id             : parser.error("Missing pilot id (-p)")
     if not options.agent_scheduler      : parser.error("Missing agent scheduler (-q)")
-    if not options.runtime              : parser.error("Missing agent runtime (-r)")
+    if not options.runtime              : parser.error("Missing or zero agent runtime (-r)")
     if not options.session_id           : parser.error("Missing session id (-s)")
 
-    rpu.prof('start', uid=options.pilot_id)
+    rpu.prof_init('agent.prof', 'start', uid=options.pilot_id)
 
     # configure the agent logger
     logger    = logging.getLogger  ('radical.pilot.agent')
