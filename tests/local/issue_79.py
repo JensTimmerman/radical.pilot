@@ -3,11 +3,9 @@
 import sys
 import radical.pilot as rp
 
-
 # ##############################################################################
 # #79: Cannot get stderr for failed CU
 # ##############################################################################
-
 
 session = rp.Session()
 
@@ -47,5 +45,5 @@ except Exception as e:
     raise
 
 finally:
-    session.close ()
+    session.close()
 
