@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import os
 import sys
 import pytest
 import radical.pilot as rp
@@ -64,6 +65,7 @@ def rp_setup(request):
         pdesc.resource = "local.localhost"
         pdesc.runtime  = 20
         pdesc.cores    = 1
+        pdesc.cleanup  = True
 
         pilot = pmgr.submit_pilots(pdesc)
         pilot.register_callback(pilot_state_cb)
@@ -250,3 +252,42 @@ def test_issue133(rp_setup):
     for unit in units:
         #print "unit done: %s" % (unit.uid)
         assert (unit.state == rp.DONE)
+
+#-------------------------------------------------------------------------------
+#
+def test_issue165(rp_setup):
+
+    pilot, pmgr, umgr = rp_setup
+
+    pmgr.register_callback(pilot_state_cb)
+    umgr.register_callback(unit_state_cb)
+
+    # prepare some input files for the compute units
+    os.system ('hostname > file1.dat')
+    os.system ('date     > file2.dat')
+
+    cud = rp.ComputeUnitDescription()
+    #---------------------------------------------------------------------------
+    # Arguments are all treated as strings and don't need special quoting 
+    # in the CUD.
+    #---------------------------------------------------------------------------
+    cud.executable = "/bin/bash"
+    cud.arguments = ["-l", "-c", "cat ./file1.dat ./file2.dat > result.dat"]
+    #---------------------------------------------------------------------------
+    # In the backend, arguments containing spaces will get special treatment, 
+    # so that they remain intact as strings.
+    # This CUD will thus be executed as: 
+    # /bin/bash -l -c "cat ./file1.dat ./file2.dat > result.dat"
+    #---------------------------------------------------------------------------
+    cud.input_staging  = ['file1.dat', 'file2.dat']
+    cud.output_staging = ['result.dat']
+
+    unit = umgr.submit_units(cud)
+    unit.wait()
+
+    assert (unit.state == rp.DONE)
+
+    # delete the test data files
+    os.system ('rm -f file1.dat')
+    os.system ('rm -f file2.dat')
+    os.system ('rm -f result.dat')
