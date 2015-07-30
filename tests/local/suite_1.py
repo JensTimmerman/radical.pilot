@@ -62,8 +62,47 @@ def rp_setup(request):
 
         pdesc = rp.ComputePilotDescription()
         pdesc.resource = "local.localhost"
-        pdesc.runtime  = 15
+        pdesc.runtime  = 20
         pdesc.cores    = 1
+
+        pilot = pmgr.submit_pilots(pdesc)
+        pilot.register_callback(pilot_state_cb)
+
+        umgr.add_pilots(pilot)
+
+    except Exception as e:
+        print 'test failed'
+        raise
+
+    def fin():
+        pmgr.cancel_pilots()       
+        pmgr.wait_pilots() 
+
+        print 'closing session'
+        session.close()
+    request.addfinalizer(fin)
+
+    return pilot, pmgr, umgr
+
+#-------------------------------------------------------------------------------
+#
+@pytest.fixture(scope="module")
+def rp_setup_short(request):
+
+    session = rp.Session(database_url=db_url, 
+                         database_name='rp-testing')
+
+    try:
+        pmgr = rp.PilotManager(session=session)
+        umgr = rp.UnitManager (session=session,
+                               scheduler=rp.SCHED_DIRECT_SUBMISSION)
+
+        pdesc = rp.ComputePilotDescription()
+        pdesc.resource = "local.localhost"
+        pdesc.runtime  = 1
+        pdesc.cores    = 1
+        pdesc.sandbox  = "/tmp/radical.pilot.sandbox.unittests"
+        pdesc.cleanup  = True
 
         pilot = pmgr.submit_pilots(pdesc)
         pilot.register_callback(pilot_state_cb)
@@ -146,7 +185,7 @@ def test_issue88(rp_setup):
 
     unit_descr = rp.ComputeUnitDescription()
     unit_descr.executable = "/bin/sleep"
-    unit_descr.arguments  = ['10']
+    unit_descr.arguments  = ['5']
     unit_descr.cores = 1
 
     units = []
@@ -161,3 +200,53 @@ def test_issue88(rp_setup):
 
     global cb_counter
     assert (cb_counter > 3) # one invokation to capture final state
+
+
+#-------------------------------------------------------------------------------
+#
+def test_issue114_3(rp_setup_short):
+
+    pilot, pmgr, umgr = rp_setup_short
+
+    state = pmgr.wait_pilots(state=[rp.ACTIVE, 
+                                    rp.DONE, 
+                                    rp.FAILED], 
+                                    timeout=20*60)
+    
+    assert state       == [rp.ACTIVE], 'state      : %s' % state    
+    assert pilot.state ==  rp.ACTIVE , 'pilot state: %s' % pilot.state 
+    
+    state = pmgr.wait_pilots(timeout=3*60)
+    
+    #print "pilot %s: %s / %s" % (pilot.uid, pilot.state, state)
+    #for entry in pilot.state_history :
+    #    print "      %s : %s" % (entry.timestamp, entry.state)
+    #for log in pilot.log :
+    #    print "      log : %s" % log
+    
+    assert state       == [rp.DONE], 'state      : %s' % state        
+    assert pilot.state ==  rp.DONE , 'pilot state: %s' % pilot.state  
+
+#-------------------------------------------------------------------------------
+#
+def test_issue133(rp_setup):
+
+    pilot, pmgr, umgr = rp_setup
+
+    compute_units = []
+    for unit_count in range(0, 4):
+        cu = rp.ComputeUnitDescription()
+        cu.executable = "/bin/date"
+        cu.cores = 1
+
+        compute_units.append(cu)
+
+    units = umgr.submit_units(compute_units)
+
+    # Wait for all compute units to finish.
+    for unit in units:
+        unit.wait()
+
+    for unit in units:
+        #print "unit done: %s" % (unit.uid)
+        assert (unit.state == rp.DONE)
