@@ -5,10 +5,6 @@ import sys
 import pytest
 import radical.pilot as rp
 
-#-------------------------------------------------------------------------------
-# merge: issue 79, 87 and 88
-#-------------------------------------------------------------------------------
-
 cb_counter = 0
 db_url     = "mongodb://ec2-54-221-194-147.compute-1.amazonaws.com:24242/"
 
@@ -127,6 +123,43 @@ def rp_setup_short(request):
 
 #-------------------------------------------------------------------------------
 #
+@pytest.fixture(scope="module")
+def rp_setup_state(request):
+
+    session = rp.Session(database_url=db_url, 
+                         database_name='rp-testing')
+
+    try:
+        pmgr = rp.PilotManager(session=session)
+        umgr = rp.UnitManager (session=session,
+                               scheduler=rp.SCHED_DIRECT_SUBMISSION,
+                               output_transfer_workers=4,
+                               input_transfer_workers=4)
+
+        pdesc = rp.ComputePilotDescription()
+        pdesc.resource = "local.localhost"
+        pdesc.runtime  = 20
+        pdesc.cores    = 1
+        pdesc.cleanup  = True
+
+        pilot = pmgr.submit_pilots(pdesc)
+        pilot.register_callback(pilot_state_cb)
+
+        umgr.add_pilots(pilot)
+
+    except Exception as e:
+        print 'test failed'
+        raise
+
+    def fin():
+        print 'closing session'
+        session.close()
+    request.addfinalizer(fin)
+
+    return pilot, pmgr, umgr
+
+#-------------------------------------------------------------------------------
+#
 def test_issue79(rp_setup):
 
     pilot, pmgr, umgr = rp_setup
@@ -202,7 +235,6 @@ def test_issue88(rp_setup):
 
     global cb_counter
     assert (cb_counter > 3) # one invokation to capture final state
-
 
 #-------------------------------------------------------------------------------
 #
@@ -291,3 +323,84 @@ def test_issue165(rp_setup):
     os.system ('rm -f file1.dat')
     os.system ('rm -f file2.dat')
     os.system ('rm -f result.dat')
+
+#-------------------------------------------------------------------------------
+#
+def test_issue258():
+
+    session = rp.Session(database_url=db_url, 
+                         database_name='rp-testing')
+
+    with pytest.raises(KeyError):
+        pmgr = rp.PilotManager(session=session)
+        pmgr.wait_pilots(pilot_ids="12", state=rp.ACTIVE)
+        
+    session.close()
+
+#-------------------------------------------------------------------------------
+#
+def test_issue286(rp_setup):
+
+    pilot, pmgr, umgr = rp_setup
+
+    pmgr.register_callback(pilot_state_cb)
+    umgr.register_callback(unit_state_cb)
+
+    cu = rp.ComputeUnitDescription()
+    cu.executable    = "cat"
+    cu.arguments     = ["issue_286.txt"]
+    cu.input_staging =  "issue_286.txt"
+    cu.cores = 1
+
+    unit = umgr.submit_units(cu)
+
+    unit.wait()
+
+    assert (unit.state == rp.DONE)
+
+#-------------------------------------------------------------------------------
+#
+def test_state_history(rp_setup_state):
+
+    pilot, pmgr, umgr = rp_setup_state
+
+    compute_units = []
+    for unit_count in range(0, 8):
+        cu = rp.ComputeUnitDescription()
+        cu.executable = "/bin/date"
+        compute_units.append(cu)
+
+    units = umgr.submit_units(compute_units)
+
+    umgr.wait_units()
+
+    pmgr.cancel_pilots()
+    pmgr.wait_pilots(state=[rp.CANCELED, rp.DONE, rp.FAILED])
+
+    for unit in umgr.get_units():
+        print "unit %s" % unit.uid
+        states = list()
+        for entry in unit.state_history:
+            print " * %s: %s" % (entry.timestamp, entry.state)
+            states.append (entry.state)
+        assert (states)
+        assert (rp.SCHEDULING in states)
+        assert (rp.ALLOCATING in states)
+        assert (rp.EXECUTING  in states)
+        assert (rp.DONE       in states)
+
+    print "\n== PILOT STATE HISTORY==\n"
+
+    print "pilot %s" % pilot.uid
+    states = list()
+    for entry in pilot.state_history:
+        print " * %s: %s" % (entry.timestamp, entry.state)
+        states.append (entry.state)
+    assert (states)
+    assert (rp.PENDING_LAUNCH in states)
+    assert (rp.LAUNCHING      in states)
+    assert (rp.PENDING_ACTIVE in states)
+    assert (rp.ACTIVE         in states)
+    assert (rp.CANCELED       in states)
+
+    
