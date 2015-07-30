@@ -133,3 +133,31 @@ def test_issue87(rp_setup):
     global cb_counter
     assert (cb_counter > 1) # one invokation to capture final state
 
+#-------------------------------------------------------------------------------
+#
+def test_issue88(rp_setup):
+
+    global cb_counter
+    cb_counter = 0
+
+    pilot, pmgr, umgr = rp_setup
+
+    pmgr.wait_pilots(pilot.uid,'Active')
+
+    unit_descr = rp.ComputeUnitDescription()
+    unit_descr.executable = "/bin/sleep"
+    unit_descr.arguments  = ['10']
+    unit_descr.cores = 1
+
+    units = []
+    for i in range(0,4):
+        unit = umgr.submit_units(unit_descr)
+        units.append(unit)
+
+    for unit in units:    
+        unit.register_callback(unit_state_cb)
+    
+    umgr.wait_units()
+
+    global cb_counter
+    assert (cb_counter > 3) # one invokation to capture final state
