@@ -5,8 +5,11 @@ import sys
 import json
 import time
 import pytest
+import logging
 import datetime
 import radical.pilot as rp
+
+logging.raiseExceptions = False
 
 db_url     = "mongodb://ec2-54-221-194-147.compute-1.amazonaws.com:24242/"
 
@@ -49,6 +52,98 @@ def unit_state_cb (unit, state):
     if state in [rp.DONE, rp.FAILED, rp.CANCELED]:
         for cb in unit.callback_history:
             print cb
+
+#-------------------------------------------------------------------------------
+#
+@pytest.fixture(scope="module")
+def setup_local_1(request):
+
+    session1 = rp.Session(database_url=db_url, 
+                         database_name='rp-testing')
+
+    print "session id local_1: {0}".format(session1.uid)
+
+    try:
+        pmgr1 = rp.PilotManager(session=session1)
+
+        print "pm id local_1: {0}".format(pmgr1.uid)
+
+        umgr1 = rp.UnitManager (session=session1,
+                               scheduler=rp.SCHED_DIRECT_SUBMISSION)
+
+        pdesc1 = rp.ComputePilotDescription()
+        pdesc1.resource = "local.localhost"
+        pdesc1.runtime  = 30
+        pdesc1.cores    = 16
+        pdesc1.cleanup  = False
+
+        pilot1 = pmgr1.submit_pilots(pdesc1)
+        pilot1.register_callback(pilot_state_cb)
+
+        umgr1.add_pilots(pilot1)
+
+    except Exception as e:
+        print 'test failed'
+        raise
+
+    def fin():
+        print "finalizing..."
+        pmgr1.cancel_pilots()       
+        pmgr1.wait_pilots() 
+
+        print 'closing session'
+        session1.close()
+        time.sleep(5)
+
+    request.addfinalizer(fin)
+
+    return session1, pilot1, pmgr1, umgr1
+
+#-------------------------------------------------------------------------------
+#
+@pytest.fixture(scope="module")
+def setup_local_2(request):
+
+    session1 = rp.Session(database_url=db_url, 
+                         database_name='rp-testing')
+
+    print "session id local_2: {0}".format(session1.uid)
+
+    try:
+        pmgr1 = rp.PilotManager(session=session1)
+
+        print "pm id local_2: {0}".format(pmgr1.uid)
+
+        umgr1 = rp.UnitManager (session=session1,
+                               scheduler=rp.SCHED_DIRECT_SUBMISSION)
+
+        pdesc1 = rp.ComputePilotDescription()
+        pdesc1.resource = "local.localhost"
+        pdesc1.runtime  = 30
+        pdesc1.cores    = 16
+        pdesc1.cleanup  = False
+
+        pilot1 = pmgr1.submit_pilots(pdesc1)
+        pilot1.register_callback(pilot_state_cb)
+
+        umgr1.add_pilots(pilot1)
+
+    except Exception as e:
+        print 'test failed'
+        raise
+
+    def fin():
+        print "finalizing..."
+        pmgr1.cancel_pilots()       
+        pmgr1.wait_pilots() 
+
+        print 'closing session'
+        session1.close()
+        time.sleep(5)
+
+    request.addfinalizer(fin)
+
+    return session1, pilot1, pmgr1, umgr1
 
 #-------------------------------------------------------------------------------
 #
@@ -154,9 +249,9 @@ def setup_comet(request):
 
 #-------------------------------------------------------------------------------
 #
-def test_one(setup_gordon, setup_comet):
+def test_one(setup_local_1, setup_local_2):
 
-    session, pilot, pmgr, umgr = setup_gordon
+    session, pilot, pmgr, umgr = setup_local_1
 
     print "session id test: {0}".format(session.uid)
 

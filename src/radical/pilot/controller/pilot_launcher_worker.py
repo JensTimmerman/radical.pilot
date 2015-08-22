@@ -755,7 +755,10 @@ class PilotLauncherWorker(threading.Thread):
                                                         "timestamp": ts}},
                              "$pushAll": {"log": log_dicts}}
                         )
-                        logger.exception ('\n'.join (log_messages))
+                        msg=""
+                        for lm in log_messages:
+                            msg += "%s\n" % str(lm)
+                        logger.exception (msg)
 
         except SystemExit as e :
             logger.exception("pilot launcher thread caught system exit -- forcing application shutdown")
